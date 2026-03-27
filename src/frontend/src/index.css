@@ -1,5 +1,29 @@
 @import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&family=JetBrains+Mono:ital,wght@0,300..700;1,300..700&display=swap");
 
+/* ── Critical: disable ALL browser touch interference ───────── */
+html,
+body,
+#root {
+  touch-action: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -webkit-tap-highlight-color: transparent !important;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overscroll-behavior: none;
+}
+
+canvas {
+  touch-action: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -webkit-tap-highlight-color: transparent !important;
+  display: block;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -13,15 +37,15 @@
     --card-foreground: 0.92 0.02 200;
     --popover: 0.08 0.015 255;
     --popover-foreground: 0.92 0.02 200;
-    --primary: 0.82 0.18 195; /* Neon cyan */
+    --primary: 0.82 0.18 195;
     --primary-foreground: 0.05 0.01 255;
-    --secondary: 0.65 0.22 320; /* Neon pink */
+    --secondary: 0.65 0.22 320;
     --secondary-foreground: 0.05 0.01 255;
     --muted: 0.18 0.02 255;
     --muted-foreground: 0.55 0.04 220;
-    --accent: 0.75 0.18 142; /* Neon green */
+    --accent: 0.75 0.18 142;
     --accent-foreground: 0.05 0.01 255;
-    --destructive: 0.55 0.22 25; /* Neon red */
+    --destructive: 0.55 0.22 25;
     --destructive-foreground: 0.92 0.01 0;
     --border: 0.22 0.04 255;
     --input: 0.15 0.02 255;
@@ -51,118 +75,5 @@
   body {
     @apply bg-background text-foreground;
     font-family: "Bricolage Grotesque", sans-serif;
-    overscroll-behavior: none;
-    -webkit-tap-highlight-color: transparent;
   }
-}
-
-/* ── Glassmorphism ──────────────────────────────────────────── */
-.glass {
-  background: rgba(4, 12, 36, 0.72);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.glass-hot {
-  background: rgba(80, 8, 8, 0.72);
-  border-color: rgba(255, 60, 60, 0.3);
-}
-
-/* ── Neon text ──────────────────────────────────────────────── */
-.neon-text-cyan {
-  color: #00e8ff;
-  text-shadow: 0 0 8px #00e8ff88, 0 0 20px #00e8ff44;
-}
-
-.neon-text-pink {
-  color: #ff40b0;
-  text-shadow: 0 0 8px #ff40b088, 0 0 20px #ff40b044;
-}
-
-.neon-text-green {
-  color: #40ff80;
-  text-shadow: 0 0 8px #40ff8088, 0 0 20px #40ff8044;
-}
-
-.neon-text-orange {
-  color: #ff8800;
-  text-shadow: 0 0 8px #ff880088, 0 0 20px #ff880044;
-}
-
-/* ── Score font ─────────────────────────────────────────────── */
-.score-display {
-  font-family: "JetBrains Mono", monospace;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ── Board glow ─────────────────────────────────────────────── */
-.board-glow {
-  filter: drop-shadow(0 0 16px rgba(30, 100, 255, 0.35))
-    drop-shadow(0 0 40px rgba(30, 100, 255, 0.15));
-}
-
-/* ── Animations ─────────────────────────────────────────────── */
-@keyframes float {
-  0%,
-  100% {
-    transform: translateY(0px);
-  }
-  50% {
-    transform: translateY(-6px);
-  }
-}
-
-@keyframes pulse-neon {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-@keyframes bust-shake {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  20% {
-    transform: translateX(-5px);
-  }
-  40% {
-    transform: translateX(5px);
-  }
-  60% {
-    transform: translateX(-4px);
-  }
-  80% {
-    transform: translateX(4px);
-  }
-}
-
-@keyframes pulse-ring {
-  0% {
-    transform: translateX(-50%) scale(1);
-    opacity: 0.6;
-  }
-  50% {
-    transform: translateX(-50%) scale(1.25);
-    opacity: 0.2;
-  }
-  100% {
-    transform: translateX(-50%) scale(1);
-    opacity: 0.6;
-  }
-}
-
-.animate-float {
-  animation: float 3.5s ease-in-out infinite;
-}
-.animate-pulse-neon {
-  animation: pulse-neon 1.8s ease-in-out infinite;
-}
-.animate-bust-shake {
-  animation: bust-shake 0.35s ease-in-out;
 }

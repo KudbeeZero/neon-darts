@@ -1,8 +1,37 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title></title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Neon Darts</title>
+    <style>
+      /* Kill ALL browser touch behaviours at the root level */
+      html, body {
+        touch-action: none !important;
+        overscroll-behavior: none !important;
+        overflow: hidden !important;
+        position: fixed !important;
+        width: 100% !important;
+        height: 100% !important;
+        margin: 0;
+        padding: 0;
+        -webkit-tap-highlight-color: transparent !important;
+        -webkit-text-size-adjust: none !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+      }
+      #root {
+        touch-action: none !important;
+        overflow: hidden !important;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
