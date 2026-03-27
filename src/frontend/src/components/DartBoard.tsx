@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ─── Types ──────────────────────────────────────────────────
 export interface ThrowResult {
@@ -13,20 +13,22 @@ export interface ThrowResult {
 }
 
 interface Props {
-  onThrow: (result: ThrowResult) => void;
   throws: ThrowResult[];
   disabled?: boolean;
   bustActive?: boolean;
+  latestThrow?: ThrowResult | null;
+  practiceMode?: "around-world" | "doubles" | "triples" | null;
+  aroundWorldTarget?: number;
 }
 
 // ─── Board constants ─────────────────────────────────────────
 const CX = 200;
 const CY = 200;
-const SEGMENTS = [
+export const SEGMENTS = [
   20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5,
 ];
 
-const R = {
+export const R = {
   bullseye: 9,
   bull: 22,
   tripleInner: 96,
@@ -39,25 +41,21 @@ const R = {
 } as const;
 
 const COLORS = {
-  segA: "#0c0c18",
-  segB: "#080810",
-  tripleA: "#00c8c0",
-  tripleB: "#c03090",
-  doubleA: "#00b848",
-  doubleB: "#b82818",
-  bull: "#b84010",
-  bullseye2: "#e83030",
-  wire: "#1a1a30",
-  wireStroke: "#303060",
-  numberLabel: "#8ab0cc",
-  outerRing: "#0a0a18",
-  outerBorder: "#1e1e3a",
+  segA: "#050a14",
+  segB: "#03060e",
+  tripleA: "#1a7fff",
+  tripleB: "#9933ff",
+  doubleA: "#ff8800",
+  doubleB: "#cc1133",
+  bull: "#dd4400",
+  wire: "#0d1530",
+  wireStroke: "#1e2a50",
+  numberLabel: "#ffffff",
+  outerRing: "#060c1e",
+  outerBorder: "#101830",
 } as const;
 
-// ─── Drag constants ───────────────────────────────────────────
-const MAX_DRAG = 85;
-
-// ─── Geometry helpers ────────────────────────────────────────
+// ─── Geometry helpers ─────────────────────────────────────────
 function polar(r: number, deg: number) {
   const rad = (deg - 90) * (Math.PI / 180);
   return { x: CX + r * Math.cos(rad), y: CY + r * Math.sin(rad) };
@@ -83,14 +81,18 @@ function annularSector(
   ].join(" ");
 }
 
-// ─── Hit detection ───────────────────────────────────────────
+// ─── Hit detection ────────────────────────────────────────────
 function normalRandom() {
   const u1 = Math.random() || 1e-10;
   const u2 = Math.random();
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
-function computeScore(rawX: number, rawY: number, scatter = 2): ThrowResult {
+export function computeScore(
+  rawX: number,
+  rawY: number,
+  scatter = 2,
+): ThrowResult {
   const hitX = rawX + normalRandom() * scatter;
   const hitY = rawY + normalRandom() * scatter;
   const dx = hitX - CX;
@@ -165,25 +167,32 @@ interface Popup {
   x: number;
   y: number;
   score: number;
+  label: string;
 }
 
-// ─── DartBoard Component ──────────────────────────────────────
-export default function DartBoard({
-  onThrow,
-  throws,
-  disabled,
-  bustActive,
-}: Props) {
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(
-    null,
+function GlowFilter({ id, blur }: { id: string; blur: number }) {
+  return (
+    <filter id={id} x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation={blur} result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
   );
-  const [dragCurrent, setDragCurrent] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
+}
+
+// ─── DartBoard Component (visual only) ───────────────────────
+export default function DartBoard({
+  throws,
+  bustActive,
+  latestThrow,
+  practiceMode,
+  aroundWorldTarget,
+}: Props) {
   const [popups, setPopups] = useState<Popup[]>([]);
-  const svgRef = useRef<SVGSVGElement>(null);
+  const prevLatestRef = useRef<ThrowResult | null>(null);
+  const [pulsePhase, setPulsePhase] = useState(0);
 
   useEffect(() => {
     if (bustActive) {
@@ -191,319 +200,252 @@ export default function DartBoard({
     }
   }, [bustActive]);
 
-  const getSvgCoords = useCallback((clientX: number, clientY: number) => {
-    const svg = svgRef.current;
-    if (!svg) return null;
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left) * (400 / rect.width),
-      y: (clientY - rect.top) * (400 / rect.height),
-    };
-  }, []);
-
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<SVGSVGElement>) => {
-      if (disabled || bustActive) return;
-      const pos = getSvgCoords(e.clientX, e.clientY);
-      if (!pos) return;
-      e.currentTarget.setPointerCapture(e.pointerId);
-      setDragStart(pos);
-      setDragCurrent(pos);
-      setIsDragging(true);
-    },
-    [disabled, bustActive, getSvgCoords],
-  );
-
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent<SVGSVGElement>) => {
-      if (!isDragging) return;
-      const pos = getSvgCoords(e.clientX, e.clientY);
-      if (pos) setDragCurrent(pos);
-    },
-    [isDragging, getSvgCoords],
-  );
-
-  const handlePointerUp = useCallback(
-    (_e: React.PointerEvent<SVGSVGElement>) => {
-      if (!isDragging || !dragStart || !dragCurrent) {
-        setIsDragging(false);
-        setDragStart(null);
-        setDragCurrent(null);
-        return;
-      }
-
-      // Raw delta: reversed for throw direction
-      let rawDx = dragStart.x - dragCurrent.x;
-      let rawDy = dragStart.y - dragCurrent.y;
-
-      // Clamp magnitude
-      const mag = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
-      const clampedMag = Math.min(mag, MAX_DRAG);
-      if (mag > 0) {
-        rawDx = (rawDx / mag) * clampedMag;
-        rawDy = (rawDy / mag) * clampedMag;
-      }
-
-      // Aim assist: 8% nudge toward board center
-      const assistDx = (CX - dragStart.x) * 0.08;
-      const assistDy = (CY - dragStart.y) * 0.08;
-      rawDx += assistDx;
-      rawDy += assistDy;
-
-      const power = clampedMag / MAX_DRAG;
-      const scatter = power > 0.75 ? 2 + (14 - 2) * ((power - 0.75) / 0.25) : 2;
-
-      // Map drag to board hit position
-      const hitX = CX + rawDx * (R.wire / MAX_DRAG) * 0.95;
-      const hitY = CY + rawDy * (R.wire / MAX_DRAG) * 0.95;
-
-      const result = computeScore(hitX, hitY, scatter);
-      onThrow(result);
-
+  useEffect(() => {
+    if (latestThrow && latestThrow !== prevLatestRef.current) {
+      prevLatestRef.current = latestThrow;
       const popup: Popup = {
-        id: result.id,
-        x: result.x,
-        y: Math.max(30, result.y - 15),
-        score: result.score,
+        id: latestThrow.id,
+        x: latestThrow.x,
+        y: Math.max(25, latestThrow.y - 18),
+        score: latestThrow.score,
+        label: latestThrow.label,
       };
       setPopups((prev) => [...prev, popup]);
       setTimeout(
         () => setPopups((prev) => prev.filter((p) => p.id !== popup.id)),
         1400,
       );
-
-      setIsDragging(false);
-      setDragStart(null);
-      setDragCurrent(null);
-    },
-    [isDragging, dragStart, dragCurrent, onThrow],
-  );
-
-  // Compute aim line data
-  let aimLineEnd: { x: number; y: number } | null = null;
-  let power = 0;
-  if (isDragging && dragStart && dragCurrent) {
-    let rawDx = dragStart.x - dragCurrent.x;
-    let rawDy = dragStart.y - dragCurrent.y;
-    const mag = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
-    const clampedMag = Math.min(mag, MAX_DRAG);
-    power = clampedMag / MAX_DRAG;
-    if (mag > 0) {
-      rawDx = rawDx / mag;
-      rawDy = rawDy / mag;
     }
-    aimLineEnd = {
-      x: dragStart.x + rawDx * 70,
-      y: dragStart.y + rawDy * 70,
+  }, [latestThrow]);
+
+  // Pulse animation for practice ring highlights
+  useEffect(() => {
+    if (!practiceMode || practiceMode === "around-world") return;
+    let frame: number;
+    let start: number | null = null;
+    const animate = (ts: number) => {
+      if (!start) start = ts;
+      const t = ((ts - start) % 1200) / 1200;
+      setPulsePhase(t);
+      frame = requestAnimationFrame(animate);
     };
-  }
+    frame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frame);
+  }, [practiceMode]);
 
   const segments = SEGMENTS.map((num, idx) => {
-    const startDeg = idx * 18 - 9;
-    const endDeg = startDeg + 18;
-    const isEven = idx % 2 === 0;
-    return {
-      num,
-      idx,
-      startDeg,
-      endDeg,
-      isEven,
-      singleInner: annularSector(R.bull, R.tripleInner, startDeg, endDeg),
-      triple: annularSector(R.tripleInner, R.tripleOuter, startDeg, endDeg),
-      singleOuter: annularSector(
-        R.tripleOuter,
-        R.doubleInner,
-        startDeg,
-        endDeg,
-      ),
-      double: annularSector(R.doubleInner, R.doubleOuter, startDeg, endDeg),
-      numberPos: polar(R.number, idx * 18),
-    };
+    const centerDeg = idx * 18;
+    const startDeg = centerDeg - 9;
+    const endDeg = centerDeg + 9;
+    return { num, idx, startDeg, endDeg, isEven: idx % 2 === 0 };
   });
 
-  const dartColors = ["#00e8ff", "#ff40b0", "#40ff80"];
+  const targetSegIdx =
+    practiceMode === "around-world" && aroundWorldTarget
+      ? SEGMENTS.indexOf(aroundWorldTarget)
+      : -1;
+
+  const pulseOpacity =
+    practiceMode && practiceMode !== "around-world"
+      ? 0.3 + Math.sin(pulsePhase * Math.PI * 2) * 0.25
+      : 0;
 
   return (
-    <div className="relative w-full h-full">
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
       <svg
-        ref={svgRef}
         viewBox="0 0 400 400"
+        aria-label="Dartboard"
         role="img"
-        aria-label="Neon dartboard — drag to throw"
-        className={`w-full h-full select-none ${
-          disabled || bustActive ? "opacity-60" : "cursor-crosshair"
-        }`}
-        style={{ touchAction: "none", userSelect: "none" }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        style={{ width: "100%", height: "100%", overflow: "visible" }}
       >
-        <title>Neon Dartboard</title>
+        <title>Dartboard</title>
         <defs>
-          <filter
-            id="glow-triple-cyan"
-            x="-30%"
-            y="-30%"
-            width="160%"
-            height="160%"
-          >
-            <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b1" />
-            <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="b2" />
-            <feMerge>
-              <feMergeNode in="b2" />
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter
-            id="glow-triple-pink"
-            x="-30%"
-            y="-30%"
-            width="160%"
-            height="160%"
-          >
-            <feColorMatrix
-              in="SourceGraphic"
-              type="matrix"
-              values="0.8 0.1 0.4 0 0  0.1 0 0.3 0 0  0.4 0.1 0.8 0 0  0 0 0 1 0"
-              result="tinted"
-            />
-            <feGaussianBlur in="tinted" stdDeviation="4" result="b1" />
-            <feGaussianBlur in="tinted" stdDeviation="8" result="b2" />
-            <feMerge>
-              <feMergeNode in="b2" />
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter
-            id="glow-double-green"
-            x="-30%"
-            y="-30%"
-            width="160%"
-            height="160%"
-          >
-            <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="b1" />
-            <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="b2" />
-            <feMerge>
-              <feMergeNode in="b2" />
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="glow-bull" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="b1" />
-            <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="b2" />
-            <feMerge>
-              <feMergeNode in="b2" />
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="glow-dart" x="-100%" y="-100%" width="300%" height="300%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="glow-text" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="glow-aim" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <radialGradient id="boardAmbient" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#1a1a40" stopOpacity="0" />
-            <stop offset="100%" stopColor="#000010" stopOpacity="0.7" />
+          <GlowFilter id="glow-triple-blue" blur={2} />
+          <GlowFilter id="glow-triple-purple" blur={2} />
+          <GlowFilter id="glow-double-orange" blur={2} />
+          <GlowFilter id="glow-double-red" blur={2} />
+          <GlowFilter id="glow-bull" blur={3} />
+          <GlowFilter id="glow-text" blur={1.5} />
+          <GlowFilter id="glow-dart" blur={2} />
+          <GlowFilter id="glow-target-seg" blur={4} />
+          <radialGradient id="bull-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#ffaa00" stopOpacity="0.9" />
+            <stop offset="40%" stopColor="#ff6600" stopOpacity="0.8" />
+            <stop offset="100%" stopColor="#cc1100" stopOpacity="0.3" />
+          </radialGradient>
+          <radialGradient id="board-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#1a4fff" stopOpacity="0.15" />
+            <stop offset="60%" stopColor="#0033cc" stopOpacity="0.05" />
+            <stop offset="100%" stopColor="transparent" stopOpacity="0" />
           </radialGradient>
         </defs>
 
-        {/* Outer bezel */}
-        <circle cx={CX} cy={CY} r={R.outer} fill={COLORS.outerBorder} />
-        <circle cx={CX} cy={CY} r={R.wire} fill={COLORS.outerRing} />
-
-        {/* Singles */}
-        {segments.map(({ idx, isEven, singleInner, singleOuter }) => (
-          <g key={`s${idx}`}>
-            <path
-              d={singleInner}
-              fill={isEven ? COLORS.segA : COLORS.segB}
-              stroke={COLORS.wire}
-              strokeWidth="0.3"
-            />
-            <path
-              d={singleOuter}
-              fill={isEven ? COLORS.segA : COLORS.segB}
-              stroke={COLORS.wire}
-              strokeWidth="0.3"
-            />
-          </g>
-        ))}
-
-        {/* Triples */}
-        {segments.map(({ idx, isEven, triple }) => (
-          <path
-            key={`t${idx}`}
-            d={triple}
-            fill={isEven ? COLORS.tripleA : COLORS.tripleB}
-            stroke={COLORS.wire}
-            strokeWidth="0.4"
-            filter={
-              isEven ? "url(#glow-triple-cyan)" : "url(#glow-triple-pink)"
-            }
-          />
-        ))}
-
-        {/* Doubles */}
-        {segments.map(({ idx, isEven, double: dbl }) => (
-          <path
-            key={`d${idx}`}
-            d={dbl}
-            fill={isEven ? COLORS.doubleA : COLORS.doubleB}
-            stroke={COLORS.wire}
-            strokeWidth="0.4"
-            filter="url(#glow-double-green)"
-          />
-        ))}
-
-        {/* Vignette */}
+        {/* Outer frame */}
         <circle
           cx={CX}
           cy={CY}
-          r={R.wire}
-          fill="url(#boardAmbient)"
-          pointerEvents="none"
+          r={R.outer + 8}
+          fill={COLORS.outerRing}
+          stroke={COLORS.outerBorder}
+          strokeWidth="3"
         />
 
-        {/* Wire dividers */}
-        {segments.map(({ idx, startDeg }) => {
-          const inner = polar(R.bull, startDeg);
-          const outer = polar(R.doubleOuter, startDeg);
-          return (
-            <line
-              key={`w${idx}`}
-              x1={inner.x}
-              y1={inner.y}
-              x2={outer.x}
-              y2={outer.y}
-              stroke={COLORS.wireStroke}
-              strokeWidth="0.8"
-              opacity="0.6"
-            />
-          );
-        })}
+        {/* Board glow */}
+        <circle cx={CX} cy={CY} r={R.outer + 8} fill="url(#board-glow)" />
 
-        {/* Bull (25) */}
+        {/* Segments */}
+        {segments.map(({ num, idx, startDeg, endDeg, isEven }) => (
+          <g key={num}>
+            {practiceMode === "around-world" && targetSegIdx === idx && (
+              <path
+                d={annularSector(R.bull, R.doubleOuter, startDeg, endDeg)}
+                fill="rgba(255,255,100,0.22)"
+                filter="url(#glow-target-seg)"
+              />
+            )}
+            <path
+              d={annularSector(R.bull, R.tripleInner, startDeg, endDeg)}
+              fill={isEven ? COLORS.segA : COLORS.segB}
+            />
+            <path
+              d={annularSector(R.tripleInner, R.tripleOuter, startDeg, endDeg)}
+              fill={isEven ? COLORS.tripleA : COLORS.tripleB}
+              filter={
+                isEven ? "url(#glow-triple-blue)" : "url(#glow-triple-purple)"
+              }
+            />
+            <path
+              d={annularSector(R.tripleOuter, R.doubleInner, startDeg, endDeg)}
+              fill={isEven ? COLORS.segA : COLORS.segB}
+            />
+            <path
+              d={annularSector(R.doubleInner, R.doubleOuter, startDeg, endDeg)}
+              fill={isEven ? COLORS.doubleA : COLORS.doubleB}
+              filter={
+                isEven ? "url(#glow-double-orange)" : "url(#glow-double-red)"
+              }
+            />
+            <line
+              x1={polar(R.bull, startDeg).x}
+              y1={polar(R.bull, startDeg).y}
+              x2={polar(R.doubleOuter, startDeg).x}
+              y2={polar(R.doubleOuter, startDeg).y}
+              stroke={COLORS.wireStroke}
+              strokeWidth="0.7"
+              opacity="0.5"
+            />
+            <text
+              x={polar(R.number, idx * 18).x}
+              y={polar(R.number, idx * 18).y}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fill={
+                practiceMode === "around-world" && num === aroundWorldTarget
+                  ? "#ffe040"
+                  : COLORS.numberLabel
+              }
+              fontSize="11"
+              fontFamily="JetBrains Mono, monospace"
+              fontWeight="700"
+              filter="url(#glow-text)"
+            >
+              {num}
+            </text>
+          </g>
+        ))}
+
+        {/* Practice mode ring overlays */}
+        {practiceMode === "doubles" && (
+          <>
+            <circle
+              cx={CX}
+              cy={CY}
+              r={(R.doubleInner + R.doubleOuter) / 2}
+              fill="none"
+              stroke="#ff8800"
+              strokeWidth={R.doubleOuter - R.doubleInner}
+              opacity={pulseOpacity}
+            />
+            <circle
+              cx={CX}
+              cy={CY}
+              r={(R.doubleInner + R.doubleOuter) / 2}
+              fill="none"
+              stroke="rgba(255,180,0,0.6)"
+              strokeWidth="2"
+              opacity={pulseOpacity * 1.5}
+            />
+          </>
+        )}
+        {practiceMode === "triples" && (
+          <>
+            <circle
+              cx={CX}
+              cy={CY}
+              r={(R.tripleInner + R.tripleOuter) / 2}
+              fill="none"
+              stroke="#00e8ff"
+              strokeWidth={R.tripleOuter - R.tripleInner}
+              opacity={pulseOpacity}
+            />
+            <circle
+              cx={CX}
+              cy={CY}
+              r={(R.tripleInner + R.tripleOuter) / 2}
+              fill="none"
+              stroke="rgba(0,150,255,0.8)"
+              strokeWidth="2"
+              opacity={pulseOpacity * 1.5}
+            />
+          </>
+        )}
+
+        {/* Ring borders */}
+        <circle
+          cx={CX}
+          cy={CY}
+          r={R.doubleOuter}
+          fill="none"
+          stroke={COLORS.wireStroke}
+          strokeWidth="1"
+        />
+        <circle
+          cx={CX}
+          cy={CY}
+          r={R.doubleInner}
+          fill="none"
+          stroke={COLORS.wireStroke}
+          strokeWidth="0.5"
+          opacity="0.5"
+        />
+        <circle
+          cx={CX}
+          cy={CY}
+          r={R.tripleOuter}
+          fill="none"
+          stroke={COLORS.wireStroke}
+          strokeWidth="0.5"
+          opacity="0.5"
+        />
+        <circle
+          cx={CX}
+          cy={CY}
+          r={R.tripleInner}
+          fill="none"
+          stroke={COLORS.wireStroke}
+          strokeWidth="0.5"
+          opacity="0.5"
+        />
+
+        {/* Bull ring */}
         <circle
           cx={CX}
           cy={CY}
@@ -511,125 +453,39 @@ export default function DartBoard({
           fill={COLORS.bull}
           filter="url(#glow-bull)"
         />
-
-        {/* Bullseye (50) */}
         <circle
           cx={CX}
           cy={CY}
           r={R.bullseye}
-          fill={COLORS.bullseye2}
-          filter="url(#glow-bull)"
-        />
-        <circle
-          cx={CX}
-          cy={CY}
-          r={R.bullseye * 0.55}
-          fill="#ff6060"
+          fill="url(#bull-glow)"
           filter="url(#glow-bull)"
         />
 
-        {/* Ring outlines */}
-        {[
-          R.bull,
-          R.tripleInner,
-          R.tripleOuter,
-          R.doubleInner,
-          R.doubleOuter,
-          R.wire,
-        ].map((r) => (
-          <circle
-            key={r}
-            cx={CX}
-            cy={CY}
-            r={r}
-            fill="none"
-            stroke={COLORS.wireStroke}
-            strokeWidth={r === R.wire ? 1.5 : 0.8}
-            opacity="0.7"
-          />
-        ))}
-
-        {/* Number labels */}
-        {segments.map(({ num, idx, numberPos }) => (
-          <text
-            key={`n${idx}`}
-            x={numberPos.x}
-            y={numberPos.y}
-            textAnchor="middle"
-            dominantBaseline="central"
-            fontSize="13"
-            fontWeight="700"
-            fontFamily="JetBrains Mono, monospace"
-            fill={COLORS.numberLabel}
-            filter="url(#glow-text)"
-            style={{ userSelect: "none" }}
-          >
-            {num}
-          </text>
-        ))}
-
-        {/* Dart markers */}
-        {throws.map((t, idx) => (
-          <g key={t.id} style={{ animation: "dart-fly 0.3s ease-out" }}>
-            <circle
-              cx={t.x}
-              cy={t.y}
-              r={5}
-              fill="none"
-              stroke={dartColors[idx % 3]}
-              strokeWidth="1.5"
-              opacity="0.8"
-              filter="url(#glow-dart)"
-            />
+        {/* Embedded darts */}
+        {throws.map((t) => (
+          <g key={t.id} filter="url(#glow-dart)">
             <circle
               cx={t.x}
               cy={t.y}
               r={2.5}
-              fill={dartColors[idx % 3]}
-              filter="url(#glow-dart)"
+              fill="#c8c8c8"
+              stroke="rgba(255,255,255,0.6)"
+              strokeWidth="0.8"
             />
             <line
               x1={t.x}
               y1={t.y + 2}
               x2={t.x}
-              y2={t.y + 10}
-              stroke={dartColors[idx % 3]}
-              strokeWidth="1"
-              opacity="0.6"
+              y2={t.y + 16}
+              stroke="#1a1a2e"
+              strokeWidth="2"
             />
           </g>
         ))}
 
-        {/* Aim line */}
-        {isDragging && dragStart && aimLineEnd && (
-          <g style={{ pointerEvents: "none" }} filter="url(#glow-aim)">
-            <line
-              x1={dragStart.x}
-              y1={dragStart.y}
-              x2={aimLineEnd.x}
-              y2={aimLineEnd.y}
-              stroke="#00e8ff"
-              strokeWidth="1.5"
-              strokeDasharray="6 4"
-              opacity="0.85"
-            />
-            <circle
-              cx={dragStart.x}
-              cy={dragStart.y}
-              r={5}
-              fill="#00e8ff"
-              opacity="0.9"
-            />
-            <circle
-              cx={aimLineEnd.x}
-              cy={aimLineEnd.y}
-              r={3}
-              fill="none"
-              stroke="#00e8ff"
-              strokeWidth="1.5"
-              opacity="0.6"
-            />
-          </g>
+        {/* Bust overlay */}
+        {bustActive && (
+          <circle cx={CX} cy={CY} r={R.outer + 8} fill="rgba(180,20,20,0.15)" />
         )}
 
         {/* Score popups */}
@@ -640,51 +496,29 @@ export default function DartBoard({
               x={p.x}
               y={p.y}
               textAnchor="middle"
-              fontSize={p.score >= 50 ? "16" : p.score >= 30 ? "14" : "12"}
-              fontWeight="700"
-              fontFamily="JetBrains Mono, monospace"
+              dominantBaseline="central"
               fill={
-                p.score === 0
-                  ? "#ff6060"
-                  : p.score >= 50
-                    ? "#ffe040"
-                    : p.score >= 30
-                      ? "#00e8ff"
-                      : "#80e0ff"
+                p.score >= 50
+                  ? "#00ff88"
+                  : p.score >= 30
+                    ? "#00e8ff"
+                    : "#ffffff"
               }
-              filter="url(#glow-dart)"
+              fontSize={p.score >= 50 ? "16" : "12"}
+              fontFamily="JetBrains Mono, monospace"
+              fontWeight="800"
+              filter="url(#glow-text)"
               initial={{ opacity: 1, y: p.y }}
-              animate={{ opacity: 0, y: p.y - 35 }}
+              animate={{ opacity: 0, y: p.y - 25 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 1.2, ease: "easeOut" }}
-              style={{ pointerEvents: "none", userSelect: "none" }}
             >
-              {p.score > 0 ? `+${p.score}` : "MISS"}
+              {p.label === "BULLSEYE!" ? "💥" : "+"}
+              {p.score}
             </motion.text>
           ))}
         </AnimatePresence>
       </svg>
-
-      {/* Power indicator */}
-      {isDragging && (
-        <div
-          className="absolute bottom-0 left-0 right-0 px-3 pb-2 pt-1"
-          style={{ pointerEvents: "none" }}
-        >
-          <p className="text-[9px] font-mono text-cyan-400/70 uppercase tracking-widest mb-1">
-            POWER
-          </p>
-          <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all"
-              style={{
-                width: `${power * 100}%`,
-                background: "linear-gradient(90deg, #00e8ff, #ff40b0)",
-              }}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

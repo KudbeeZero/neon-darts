@@ -6,6 +6,8 @@ interface DartMeshProps {
   rotation?: [number, number, number];
   color?: string;
   opacity?: number;
+  barrelRadius?: number;
+  flightSize?: number;
 }
 
 export default function DartMesh({
@@ -13,20 +15,19 @@ export default function DartMesh({
   rotation = [0, 0, 0],
   color = "#00e8ff",
   opacity = 1,
+  barrelRadius = 0.055,
+  flightSize = 0.12,
 }: DartMeshProps) {
   const groupRef = useRef<THREE.Group>(null);
 
-  // Dart is oriented with tip pointing in +Z direction
-  // Tip front at Z=+0.65, flights tail at Z=-0.65
-  // Total length ~1.3 units
-
   const transparent = opacity < 1;
+  const tipRadius = barrelRadius * 0.7;
 
   return (
     <group ref={groupRef} position={position} rotation={rotation}>
-      {/* Tip — silver metallic cone, tip at Z=+0.65 */}
+      {/* Tip — silver metallic cone */}
       <mesh position={[0, 0, 0.5]} rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[0.04, 0.3, 8]} />
+        <coneGeometry args={[tipRadius, 0.3, 8]} />
         <meshStandardMaterial
           color="#c8c8c8"
           roughness={0.15}
@@ -36,9 +37,9 @@ export default function DartMesh({
         />
       </mesh>
 
-      {/* Barrel — dark metallic with neon emissive band */}
+      {/* Barrel — dark metallic with neon emissive */}
       <mesh position={[0, 0, 0.15]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.055, 0.04, 0.45, 12]} />
+        <cylinderGeometry args={[barrelRadius, tipRadius, 0.45, 12]} />
         <meshStandardMaterial
           color="#1a1a2e"
           roughness={0.3}
@@ -50,9 +51,9 @@ export default function DartMesh({
         />
       </mesh>
 
-      {/* Emissive ring in middle of barrel */}
+      {/* Emissive ring */}
       <mesh position={[0, 0, 0.15]}>
-        <torusGeometry args={[0.058, 0.008, 6, 16]} />
+        <torusGeometry args={[barrelRadius + 0.003, 0.008, 6, 16]} />
         <meshStandardMaterial
           color={color}
           emissive={color}
@@ -64,7 +65,7 @@ export default function DartMesh({
         />
       </mesh>
 
-      {/* Shaft — matte dark gray */}
+      {/* Shaft */}
       <mesh position={[0, 0, -0.2]} rotation={[Math.PI / 2, 0, 0]}>
         <cylinderGeometry args={[0.014, 0.014, 0.5, 8]} />
         <meshStandardMaterial
@@ -76,14 +77,14 @@ export default function DartMesh({
         />
       </mesh>
 
-      {/* Flights — 4x PlaneGeometry in X formation at tail */}
+      {/* Flights — 4× in X formation */}
       {[0, 45, 90, 135].map((angle) => (
         <mesh
           key={angle}
           position={[0, 0, -0.52]}
           rotation={[Math.PI / 2, (angle * Math.PI) / 180, 0]}
         >
-          <planeGeometry args={[0.12, 0.22]} />
+          <planeGeometry args={[flightSize, flightSize * 1.8]} />
           <meshStandardMaterial
             color={color}
             emissive={color}
