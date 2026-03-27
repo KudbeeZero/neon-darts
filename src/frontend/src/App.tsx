@@ -1,5 +1,5 @@
-import PhaserGame from "./game/PhaserGame";
+import R3FGame from "./game/R3FGame";
 
 export default function App() {
-  return <PhaserGame />;
+  return <R3FGame />;
 }
