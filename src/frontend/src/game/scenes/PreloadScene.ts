@@ -6,13 +6,15 @@ export default class PreloadScene extends Phaser.Scene {
   }
 
   preload() {
+    // New 3D vertical dart sprite — 160×500, tip at BOTTOM when angle=0
+    // Use setAngle(180) for tip-up rest position; setAngle(velDeg - 90) for flight
     this.load.image(
       "dart-sprite",
-      "/assets/generated/dart-sprite-transparent.dim_400x120.png",
+      "/assets/generated/dart-3d-metallic-v2-transparent.dim_160x500.png",
     );
     this.load.image(
-      "dartboard-bg",
-      "/assets/generated/dartboard-neon-arcade.dim_600x600.png",
+      "arena-bg",
+      "/assets/generated/arena-competition-bg.dim_900x1600.jpg",
     );
   }
 

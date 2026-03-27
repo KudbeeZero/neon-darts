@@ -12,12 +12,11 @@ export default function PhaserGame() {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // ── Kill browser touch interference at document level ──────────────────
+    // ── Kill browser scroll/zoom interference — but NOT touchstart ──────────
+    // Removing touchstart preventDefault so iOS synthesises pointer events,
+    // which Phaser uses for its interactive buttons (play, mode select, etc).
+    // touch-action: none on the container already prevents scrolling in CSS.
     const preventBrowserTouch = (e: TouchEvent) => e.preventDefault();
-    document.addEventListener("touchstart", preventBrowserTouch, {
-      capture: true,
-      passive: false,
-    });
     document.addEventListener("touchmove", preventBrowserTouch, {
       capture: true,
       passive: false,
@@ -39,11 +38,17 @@ export default function PhaserGame() {
       },
     );
 
+    // Use devicePixelRatio for crisp Retina rendering via the scale zoom.
+    // In Phaser 3.60+, "resolution" was removed from RenderConfig; the
+    // recommended approach is to set zoom = devicePixelRatio so the canvas
+    // draws at native pixel density, while CSS scales it back to screen size.
+    const dpr = window.devicePixelRatio || 1;
+
     const config: Phaser.Types.Core.GameConfig = {
       type: Phaser.AUTO,
       parent: containerRef.current,
-      width: window.innerWidth,
-      height: window.innerHeight,
+      width: window.innerWidth * dpr,
+      height: window.innerHeight * dpr,
       backgroundColor: "#000008",
       scene: [
         PreloadScene,
@@ -62,6 +67,7 @@ export default function PhaserGame() {
       scale: {
         mode: Phaser.Scale.RESIZE,
         autoCenter: Phaser.Scale.CENTER_BOTH,
+        zoom: 1 / dpr,
       },
       render: {
         antialias: true,
@@ -95,9 +101,6 @@ export default function PhaserGame() {
 
     return () => {
       clearTimeout(retryTimer);
-      document.removeEventListener("touchstart", preventBrowserTouch, {
-        capture: true,
-      });
       document.removeEventListener("touchmove", preventBrowserTouch, {
         capture: true,
       });

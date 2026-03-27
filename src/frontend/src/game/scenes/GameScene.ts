@@ -6,26 +6,81 @@
  *   InputLayer    →  RawInputData
  *   AimLayer      →  AimData
  *   PowerLayer    →  PowerData
- *   ThrowArcLayer →  drives tween, fires onUpdate / onComplete
+ *   ThrowArcLayer →  drives real-time physics, fires onUpdate / onComplete
  *   SpinLayer     →  dart sprite rotation
  *   ImpactLayer   →  ImpactResult + effects
  *   CameraLayer   →  all camera state / motion
  *
- * This scene owns: board drawing, HUD, score state, turn management.
- * It does NOT contain any physics, direction math, or effect code.
+ * HOVER + DRAG MECHANIC (Darts of Fury style)
+ * ────────────────────────────────────────────
+ * 1. Touch anywhere → dart snaps/animates to finger position (clamped to throw zone).
+ * 2. Drag UP/DOWN → dart follows finger; vertical position maps to aim height on board.
+ * 3. Drag DOWN past neutral → pull-back zone → adds bonus forward power.
+ * 4. Release (finger lift or fling) → dart launches from its current hover position.
+ *    - upwardBias derived from dart Y (higher dart = more upward launch velocity).
+ *    - Forward power from swipe velocity + pull-back bonus.
+ *    - normX/normY computed from dart position so aim matches physics target.
  */
 
 import Phaser from "phaser";
 import { DART_CONFIGS, type DartConfig } from "../../types/dart";
 import { playThrowSound } from "../audio";
 
-import { AimLayer } from "../layers/AimLayer";
+import { type AimData, AimLayer } from "../layers/AimLayer";
 import { CameraLayer } from "../layers/CameraLayer";
 import { ImpactLayer } from "../layers/ImpactLayer";
 import { InputLayer } from "../layers/InputLayer";
-import { PowerLayer } from "../layers/PowerLayer";
+import { POWER_CONFIG, type PowerData, PowerLayer } from "../layers/PowerLayer";
 import { SpinLayer } from "../layers/SpinLayer";
-import { ThrowArcLayer } from "../layers/ThrowArcLayer";
+import { ARC_CONFIG, ThrowArcLayer } from "../layers/ThrowArcLayer";
+
+// ── Hover / drag aim configuration ────────────────────────────────────────
+//
+// All Y fractions are relative to screen height.
+// Adjust these to tune how vertical drag controls aim height.
+//
+const HOVER_CFG = {
+  /** Highest allowed dart Y (top of throw zone) — fraction of screen H */
+  MIN_Y_FRAC: 0.48,
+  /** Lowest allowed dart Y (maximum pull-back depth) — fraction of screen H */
+  MAX_Y_FRAC: 0.88,
+  /** Neutral hover position (no pull-back bonus) — fraction of screen H */
+  NEUTRAL_Y_FRAC: 0.72,
+
+  /**
+   * Exponential follow speed (units: 1/s).
+   * 12 = reaches ~95% of finger position in ~250ms — smooth but responsive.
+   * User's requested value of 0.85 (per-frame) would be ~100/s here — very snappy.
+   * Tune higher for more snap, lower for more float/animation.
+   */
+  FOLLOW_SPEED: 12.0,
+
+  /**
+   * Board hit zone extents as a fraction of boardRadius.
+   * TOP_FRAC: when dart is at MIN_Y_FRAC, the target lands this far above boardCY.
+   * BOT_FRAC: when dart is at MAX_Y_FRAC, the target lands this far below boardCY.
+   */
+  BOARD_HIT_TOP_FRAC: 1.0,
+  BOARD_HIT_BOT_FRAC: 1.0,
+
+  /** Horizontal aim spread: fraction of dart's X offset mapped to board target X */
+  H_SPREAD: 1.0,
+
+  /**
+   * upwardBias range: higher dart = more upward initial velocity = higher arc.
+   * Maps linearly: MIN_Y_FRAC → UPWARD_BIAS_HIGH, MAX_Y_FRAC → UPWARD_BIAS_LOW.
+   * User requested upwardBiasBase = 0.30; we use a range for vertical control.
+   */
+  UPWARD_BIAS_HIGH: 0.82,
+  UPWARD_BIAS_LOW: 0.1,
+
+  /** Maximum power bonus added by pulling dart below NEUTRAL_Y_FRAC (0–1 fraction) */
+  PULL_BACK_MAX_BONUS: 0.22,
+  /** Screen H fraction that corresponds to a full pull-back (bonus = max) */
+  PULL_BACK_RANGE: 0.14,
+} as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const SEGMENT_ORDER = [
   20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5,
@@ -49,21 +104,45 @@ export default class GameScene extends Phaser.Scene {
   private boardRadius = 0;
 
   // Graphics layers
+  private boardContainer!: Phaser.GameObjects.Container;
   private boardGfx!: Phaser.GameObjects.Graphics;
   private highlightGfx!: Phaser.GameObjects.Graphics;
   private blocksGfx!: Phaser.GameObjects.Graphics;
   private trailGfx!: Phaser.GameObjects.Graphics;
   private aimGfx!: Phaser.GameObjects.Graphics;
+  private targetRingGfx!: Phaser.GameObjects.Graphics;
+  private currentRingTween: Phaser.Tweens.Tween | null = null;
+  private _starGfx!: Phaser.GameObjects.Graphics;
+  private _stars: Array<{
+    x: number;
+    y: number;
+    r: number;
+    baseAlpha: number;
+    phase: number;
+    speed: number;
+  }> = [];
 
   // Dart sprite
   private dartSprite!: Phaser.GameObjects.Image;
+  /** Fixed resting position — dart returns here between throws */
   private dartStartX = 0;
   private dartStartY = 0;
+  /** Current physics-tracked dart position (during flight) */
   private dartX = 0;
   private dartY = 0;
   private dartFlying = false;
   private dartSettled = false;
   private trailPoints: Array<{ x: number; y: number }> = [];
+
+  // ── Hover / drag aim state ────────────────────────────────────────────────
+  /** True while finger is down and dart is hovering in aim position */
+  private isAiming = false;
+  /** Raw finger position (clamped in update loop) */
+  private fingerX = 0;
+  private fingerY = 0;
+  /** Smooth animated dart hover position — set by update() easing */
+  private dartHoverX = 0;
+  private dartHoverY = 0;
 
   // Landed dart images
   private landedDartImages: Phaser.GameObjects.Image[] = [];
@@ -94,7 +173,7 @@ export default class GameScene extends Phaser.Scene {
   private impactLayer!: ImpactLayer;
   private cameraLayer!: CameraLayer;
 
-  // Aim indicator state (fed from InputLayer callbacks)
+  // Used for camera following during aim drag
   private intentStartX = 0;
   private intentStartY = 0;
 
@@ -120,22 +199,70 @@ export default class GameScene extends Phaser.Scene {
     this.dartSettled = false;
     this.landedDartImages = [];
     this.lastThrowPower = 0.5;
+    this.isAiming = false;
+    this.fingerX = 0;
+    this.fingerY = 0;
+    this.dartHoverX = 0;
+    this.dartHoverY = 0;
   }
 
   create() {
     const W = this.scale.width;
     const H = this.scale.height;
 
+    // Board positioned further back — smaller radius, higher on screen
     this.boardCX = W / 2;
-    this.boardCY = H * 0.34;
-    this.boardRadius = Math.min(W, H) * 0.43;
+    this.boardCY = H * 0.24;
+    this.boardRadius = Math.min(W, H) * 0.28;
+
+    // Dart resting position — low foreground, first-person feel
     this.dartStartX = W / 2;
-    this.dartStartY = H * 0.62;
+    this.dartStartY = H * 0.82;
     this.dartX = this.dartStartX;
     this.dartY = this.dartStartY;
+    this.dartHoverX = this.dartStartX;
+    this.dartHoverY = this.dartStartY;
 
     this._buildScene();
     this._initLayers();
+  }
+
+  // ── Per-frame update (hover easing + aim indicator) ───────────────────────
+
+  update(_time: number, delta: number) {
+    if (!this.isAiming || this.dartFlying || this.dartSettled || this.gameOver)
+      return;
+
+    const H = this.scale.height;
+    const W = this.scale.width;
+    const minY = H * HOVER_CFG.MIN_Y_FRAC;
+    const maxY = H * HOVER_CFG.MAX_Y_FRAC;
+
+    // Clamp finger to throw zone
+    const targetX = Math.max(W * 0.05, Math.min(W * 0.95, this.fingerX));
+    const targetY = Math.max(minY, Math.min(maxY, this.fingerY));
+
+    // Frame-rate independent exponential easing toward finger position
+    const dtSec = Math.min(delta, 50) / 1000;
+    const lerpFactor = 1 - Math.exp(-HOVER_CFG.FOLLOW_SPEED * dtSec);
+
+    this.dartHoverX += (targetX - this.dartHoverX) * lerpFactor;
+    this.dartHoverY += (targetY - this.dartHoverY) * lerpFactor;
+
+    // Move dart sprite to hover position
+    this.dartSprite.setPosition(this.dartHoverX, this.dartHoverY);
+    this.dartX = this.dartHoverX;
+    this.dartY = this.dartHoverY;
+
+    // Angle dart tip toward board while hovering
+    const dxToBoard = this.boardCX - this.dartHoverX;
+    const dyToBoard = this.boardCY - this.dartHoverY;
+    const angleToBoard = (Math.atan2(dyToBoard, dxToBoard) * 180) / Math.PI;
+    this.dartSprite.setAngle(angleToBoard - 90); // -90 offset for vertical sprite (tip at bottom)
+
+    // Live aim indicator
+    this._drawHoverAimIndicator();
+    this._updateStars(delta);
   }
 
   // ── Scene construction ─────────────────────────────────────────────────────
@@ -144,48 +271,224 @@ export default class GameScene extends Phaser.Scene {
     const W = this.scale.width;
     const H = this.scale.height;
 
-    // Background
-    const bg = this.add.graphics();
-    bg.fillStyle(0x000008, 1);
-    bg.fillRect(0, 0, W, H);
-    for (let i = 0; i < 110; i++) {
-      bg.fillStyle(0xffffff, 0.2 + Math.random() * 0.5);
-      bg.fillCircle(
-        Math.random() * W,
-        Math.random() * H,
-        Math.random() < 0.15 ? 1.4 : 0.65,
-      );
+    // ── Deep space background ────────────────────────────────────────────────
+    const baseBg = this.add.graphics().setDepth(-10);
+    baseBg.fillStyle(0x000008, 1);
+    baseBg.fillRect(0, 0, W, H);
+
+    // Nebula blobs
+    const nebula = this.add.graphics().setDepth(-9);
+    const blobs = [
+      { x: W * 0.15, y: H * 0.2, rx: 120, ry: 80, color: 0x1a0044 },
+      { x: W * 0.85, y: H * 0.15, rx: 100, ry: 70, color: 0x001a44 },
+      { x: W * 0.1, y: H * 0.7, rx: 90, ry: 60, color: 0x0d0033 },
+      { x: W * 0.9, y: H * 0.6, rx: 110, ry: 75, color: 0x00102a },
+      { x: W * 0.5, y: H * 0.05, rx: 160, ry: 50, color: 0x0a0020 },
+    ];
+    for (const b of blobs) {
+      for (let i = 5; i >= 1; i--) {
+        nebula.fillStyle(b.color, 0.06 * i);
+        nebula.fillEllipse(b.x, b.y, b.rx * 2 * (i / 5), b.ry * 2 * (i / 5));
+      }
     }
 
-    // Stage lighting cone
-    const light = this.add.graphics();
-    light.fillStyle(0x1040a0, 0.06);
-    light.fillTriangle(W / 2 - 10, 0, W / 2 + 10, 0, W / 2 + W * 0.45, H * 0.7);
-    light.fillStyle(0x1040a0, 0.03);
-    light.fillTriangle(W / 2 - 10, 0, W / 2 + 10, 0, W / 2 - W * 0.45, H * 0.7);
+    // ── Perspective throwing lane — recedes from viewer toward board ──────────
+    const lane = this.add.graphics().setDepth(-9);
+    const laneTopW = this.boardRadius * 1.2;
+    const laneBotW = W * 0.85;
+    const laneTopY = this.boardCY + this.boardRadius * 1.1;
+    const laneBotY = H * 0.92;
+    lane.fillStyle(0x08101e, 0.9);
+    lane.fillPoints(
+      [
+        { x: this.boardCX - laneTopW / 2, y: laneTopY },
+        { x: this.boardCX + laneTopW / 2, y: laneTopY },
+        { x: this.boardCX + laneBotW / 2, y: laneBotY },
+        { x: this.boardCX - laneBotW / 2, y: laneBotY },
+      ],
+      true,
+    );
+    // Perspective edge lines receding toward board
+    lane.lineStyle(1, 0x0a2040, 0.5);
+    lane.beginPath();
+    lane.moveTo(this.boardCX - laneTopW / 2, laneTopY);
+    lane.lineTo(this.boardCX - laneBotW / 2, laneBotY);
+    lane.strokePath();
+    lane.beginPath();
+    lane.moveTo(this.boardCX + laneTopW / 2, laneTopY);
+    lane.lineTo(this.boardCX + laneBotW / 2, laneBotY);
+    lane.strokePath();
+    // Faint center line
+    lane.lineStyle(1, 0x0a2040, 0.3);
+    lane.beginPath();
+    lane.moveTo(this.boardCX, laneTopY);
+    lane.lineTo(this.boardCX, laneBotY);
+    lane.strokePath();
+    // Distance markings
+    for (let i = 1; i <= 4; i++) {
+      const frac = i / 5;
+      const lineY = laneTopY + (laneBotY - laneTopY) * frac;
+      const lineW = laneTopW + (laneBotW - laneTopW) * frac;
+      lane.lineStyle(1, 0x0d2848, 0.25 + frac * 0.1);
+      lane.beginPath();
+      lane.moveTo(this.boardCX - lineW / 2, lineY);
+      lane.lineTo(this.boardCX + lineW / 2, lineY);
+      lane.strokePath();
+    }
 
-    // Board
+    // ── Wall surface behind cabinet ───────────────────────────────────────────
+    const wall = this.add.graphics().setDepth(-8);
+    const wallW = this.boardRadius * 2.8;
+    const wallH = this.boardRadius * 2.4;
+    wall.fillStyle(0x0a0e1a, 1);
+    wall.fillRect(
+      this.boardCX - wallW / 2,
+      this.boardCY - wallH * 0.55,
+      wallW,
+      wallH,
+    );
+    // Wall edge highlight top
+    wall.lineStyle(2, 0x1a2a4a, 0.8);
+    wall.beginPath();
+    wall.moveTo(this.boardCX - wallW / 2, this.boardCY - wallH * 0.55);
+    wall.lineTo(this.boardCX + wallW / 2, this.boardCY - wallH * 0.55);
+    wall.strokePath();
+
+    // ── Cabinet depth surround ────────────────────────────────────────────────
+    const cabinet = this.add.graphics().setDepth(-7);
+    const cabR = this.boardRadius * 1.18;
+    // Cabinet face dark ring
+    cabinet.lineStyle(this.boardRadius * 0.16, 0x060a14, 1);
+    cabinet.strokeCircle(
+      this.boardCX,
+      this.boardCY,
+      cabR - this.boardRadius * 0.08,
+    );
+    // Cabinet rim highlight (top-left light)
+    cabinet.lineStyle(3, 0x1a3a5a, 0.9);
+    cabinet.beginPath();
+    cabinet.arc(
+      this.boardCX,
+      this.boardCY,
+      cabR,
+      Math.PI * 1.1,
+      Math.PI * 1.9,
+      false,
+    );
+    cabinet.strokePath();
+    // Cabinet shadow (bottom-right)
+    cabinet.lineStyle(3, 0x000205, 1);
+    cabinet.beginPath();
+    cabinet.arc(
+      this.boardCX,
+      this.boardCY,
+      cabR,
+      Math.PI * -0.1,
+      Math.PI * 0.9,
+      false,
+    );
+    cabinet.strokePath();
+    // 3D depth panels — left side
+    const depthSize = this.boardRadius * 0.12;
+    cabinet.fillStyle(0x040810, 1);
+    cabinet.fillRect(
+      this.boardCX - cabR - depthSize,
+      this.boardCY - cabR * 0.85,
+      depthSize,
+      cabR * 1.7,
+    );
+    // Right side panel
+    cabinet.fillStyle(0x080c18, 1);
+    cabinet.fillRect(
+      this.boardCX + cabR,
+      this.boardCY - cabR * 0.85,
+      depthSize,
+      cabR * 1.7,
+    );
+    // Bottom panel
+    cabinet.fillStyle(0x060a12, 1);
+    cabinet.fillRect(
+      this.boardCX - cabR,
+      this.boardCY + cabR * 0.82,
+      cabR * 2,
+      depthSize,
+    );
+
+    // Board glow halo behind the board
+    const halo = this.add.graphics().setDepth(-5);
+    for (let i = 6; i >= 1; i--) {
+      halo.fillStyle(0x0066ff, 0.025 * i);
+      halo.fillCircle(this.boardCX, this.boardCY, this.boardRadius + i * 18);
+    }
+
+    // ── Board container — vertically squashed for perspective tilt ────────────
+    // The container is positioned at boardCX, boardCY and squashes Y by 13%
+    // to simulate the board angled slightly away from the viewer.
+    // All board drawing uses local coords (0,0) relative to container center.
+    this.boardContainer = this.add
+      .container(this.boardCX, this.boardCY)
+      .setDepth(-6);
+    this.boardContainer.setScale(1, 0.87);
+
     this.boardGfx = this.add.graphics();
+    this.boardContainer.add(this.boardGfx);
     this._drawBoard();
+
+    // 3D dome shading overlay — dark rim, lighter center, top-left highlight
+    // This is drawn at absolute coords (not in container) so it covers the squashed board
+    const boardShadeGfx = this.add.graphics().setDepth(-4);
+    for (let i = 1; i <= 5; i++) {
+      boardShadeGfx.fillStyle(0x000000, 0.055);
+      boardShadeGfx.fillCircle(
+        this.boardCX,
+        this.boardCY,
+        this.boardRadius - (i - 1) * 7,
+      );
+    }
+    // Top-left highlight (light source from upper-left)
+    boardShadeGfx.fillStyle(0xffffff, 0.06);
+    boardShadeGfx.fillCircle(
+      this.boardCX - this.boardRadius * 0.2,
+      this.boardCY - this.boardRadius * 0.2,
+      this.boardRadius * 0.45,
+    );
+
+    // Practice highlight — in boardContainer so it squashes with the board
     this.highlightGfx = this.add.graphics();
+    this.boardContainer.add(this.highlightGfx);
     this._drawPracticeHighlight();
+
+    // Score blocks stay at scene level (side UI bar)
     this.blocksGfx = this.add.graphics();
     this._drawScoreBlocks();
+
+    // ── Atmospheric distance haze over board ──────────────────────────────────
+    const haze = this.add.graphics().setDepth(3);
+    for (let i = 1; i <= 4; i++) {
+      const hazeR = this.boardRadius * (0.7 + i * 0.2);
+      haze.fillStyle(0x010818, 0.06);
+      haze.fillEllipse(this.boardCX, this.boardCY, hazeR * 2, hazeR * 1.6);
+    }
+    // Subtle blue-grey tint for distance effect
+    haze.fillStyle(0x082244, 0.08);
+    haze.fillCircle(this.boardCX, this.boardCY, this.boardRadius * 1.0);
 
     // Dart layers
     this.trailGfx = this.add.graphics();
     this.aimGfx = this.add.graphics().setDepth(9);
+    this.targetRingGfx = this.add.graphics().setDepth(8);
 
-    // Dart sprite
+    // Dart sprite — reverted to original smaller size for correct perspective
     this.dartSprite = this.add.image(
       this.dartStartX,
       this.dartStartY,
       "dart-sprite",
     );
-    this.dartSprite.setAngle(-90);
-    this.dartSprite.setScale(0.28);
+    this.dartSprite.setAngle(180); // vertical sprite: 180 = tip pointing up toward board
+    this.dartSprite.setScale(0.21);
     this.dartSprite.setDepth(10);
 
+    this._buildStarField();
     this._setupHUD();
   }
 
@@ -198,112 +501,83 @@ export default class GameScene extends Phaser.Scene {
     // ── Layer 1: Input ───────────────────────────────────────────────────────
     this.inputLayer = new InputLayer(this);
 
-    this.inputLayer.onDown = (_x, _y) => {
+    // Touch DOWN → enter hover/aim mode
+    this.inputLayer.onDown = (x: number, y: number) => {
       if (this.dartFlying || this.dartSettled || this.gameOver) return;
-      this.intentStartX = _x;
-      this.intentStartY = _y;
+
+      this.isAiming = true;
+      this.intentStartX = x;
+      this.intentStartY = y;
+      this.fingerX = x;
+      this.fingerY = y;
+
+      // Snap dart to finger on touch-down (animate from here via update())
+      const H = this.scale.height;
+      const W = this.scale.width;
+      const snapY = Math.max(
+        H * HOVER_CFG.MIN_Y_FRAC,
+        Math.min(H * HOVER_CFG.MAX_Y_FRAC, y),
+      );
+      const snapX = Math.max(W * 0.05, Math.min(W * 0.95, x));
+      this.dartHoverX = snapX;
+      this.dartHoverY = snapY;
+      this.dartSprite.setPosition(snapX, snapY);
+
       if (navigator.vibrate) navigator.vibrate(20);
-      // Camera: enter aim state (micro zoom-in)
       this.cameraLayer.enterAim();
     };
 
-    this.inputLayer.onMove = (x, y) => {
-      if (this.dartFlying || this.dartSettled || this.gameOver) return;
-      this._drawAimIndicator(x, y);
-      // Camera: subtle micro-follow during aim
+    // Touch MOVE → update finger position; update() handles the smooth follow
+    this.inputLayer.onMove = (x: number, y: number) => {
+      if (
+        !this.isAiming ||
+        this.dartFlying ||
+        this.dartSettled ||
+        this.gameOver
+      )
+        return;
+      this.fingerX = x;
+      this.fingerY = y;
+
+      // Camera subtle aim follow
       const dx = x - this.intentStartX;
       const dy = y - this.intentStartY;
       this.cameraLayer.updateAimFollow(dx, dy);
     };
 
+    // Touch CANCEL (no movement) → treat as a slow throw from hover position
     this.inputLayer.onCancel = () => {
-      this.aimGfx.clear();
-      // Camera: return to idle
-      this.cameraLayer.enterIdle();
+      if (
+        this.isAiming &&
+        !this.dartFlying &&
+        !this.dartSettled &&
+        !this.gameOver
+      ) {
+        // Tap-and-release: throw with minimum power using current hover position
+        this._launchFromHover(POWER_CONFIG.MIN_SPEED);
+      } else {
+        this.aimGfx.clear();
+        this.cameraLayer.enterIdle();
+      }
+      this.isAiming = false;
     };
 
+    // Touch END with swipe → throw using swipe velocity + hover position
     this.inputLayer.onThrow = (rawInput) => {
-      if (this.dartFlying || this.dartSettled || this.gameOver) return;
+      if (
+        !this.isAiming ||
+        this.dartFlying ||
+        this.dartSettled ||
+        this.gameOver
+      )
+        return;
+      this.isAiming = false;
       this.aimGfx.clear();
-
-      // ── Layer 2: Aim ────────────────────────────────────────────────────────
-      const aim = this.aimLayer.calculate(rawInput);
-
-      // ── Layer 3: Power ───────────────────────────────────────────────────────
-      const power = this.powerLayer.calculate(rawInput);
-      this.lastThrowPower = power.power;
-
-      // Start flight
-      this.dartFlying = true;
-      this.trailPoints = [];
-      playThrowSound();
-
-      // Camera: throw release impulse
-      this.cameraLayer.enterThrow(power.power);
-
-      // ── Layer 5: Spin (starts alongside arc) ───────────────────────────────
-      this.spinLayer.reset();
-      this.spinLayer.startFlight(this, power.flightDurationMs);
-
-      // Short delay then enter flight-follow (lets throw impulse play first)
-      this.time.delayedCall(100, () => {
-        this.cameraLayer.enterFlight(this.dartX, this.dartY);
-      });
-
-      // ── Layer 4: Throw/Arc ────────────────────────────────────────────────
-      this.throwArcLayer.launch({
-        scene: this,
-        startX: this.dartStartX,
-        startY: this.dartStartY,
-        aim,
-        power,
-        boardCX: this.boardCX,
-        boardCY: this.boardCY,
-        boardRadius: this.boardRadius,
-        stability: this.selectedDart.stability,
-        weight: this.selectedDart.weight,
-        onUpdate: (x, y) => {
-          this.dartX = x;
-          this.dartY = y;
-          this.trailPoints.unshift({ x, y });
-          if (this.trailPoints.length > 9) this.trailPoints.pop();
-          this._redrawTrail();
-          // Spin layer tracks dart position each frame
-          this.spinLayer.updatePosition(x, y);
-          // Camera: smooth follow during flight
-          this.cameraLayer.updateFlight(x, y);
-        },
-        onComplete: (tx, ty) => {
-          // ── Layer 5: Spin settle ──────────────────────────────────────
-          this.spinLayer.settleOnImpact(this);
-          this.spinLayer.hide();
-
-          this.dartFlying = false;
-          this.dartSettled = true;
-          this.trailPoints = [];
-          this.trailGfx.clear();
-
-          // Camera: impact state (shake + snap back)
-          this.cameraLayer.enterImpact(this.lastThrowPower);
-
-          // ── Layer 6: Impact ───────────────────────────────────────────
-          const result = this.impactLayer.process(
-            tx,
-            ty,
-            this.boardCX,
-            this.boardCY,
-            this.boardRadius,
-            this.selectedDart.color,
-          );
-
-          this._onDartLanded(tx, ty, result);
-        },
-      });
+      this._launchFromHover(rawInput.velocityMag);
     };
 
     this.inputLayer.enable();
 
-    // Instantiate stateless/scene-bound layers
     this.aimLayer = new AimLayer();
     this.powerLayer = new PowerLayer();
     this.throwArcLayer = new ThrowArcLayer();
@@ -311,69 +585,303 @@ export default class GameScene extends Phaser.Scene {
     this.impactLayer = new ImpactLayer(this);
   }
 
-  // ── Aim indicator (pure visual — reads aim+power from current pointer) ──────
+  // ── Core throw launcher ───────────────────────────────────────────────────
+  //
+  // Called on every throw — from swipe (velocityMag = actual speed) or
+  // tap-release (velocityMag = MIN_SPEED floor).
+  // Uses the dart's CURRENT hover position as the physical launch point.
+  //
+  private _launchFromHover(velocityMag: number) {
+    const H = this.scale.height;
+    const W = this.scale.width;
 
-  private _drawAimIndicator(px: number, py: number) {
+    // Kill any existing ring tween from a previous throw
+    if (this.currentRingTween) {
+      this.currentRingTween.stop();
+      this.currentRingTween = null;
+      this.targetRingGfx.clear();
+    }
+
+    // ── 1. Vertical aim from dart Y position ─────────────────────────────────
+    //
+    // t=0  → dart at MIN_Y_FRAC (highest) → aims at top of board
+    // t=1  → dart at MAX_Y_FRAC (lowest)  → aims at bottom of board
+    //
+    const minY = H * HOVER_CFG.MIN_Y_FRAC;
+    const maxY = H * HOVER_CFG.MAX_Y_FRAC;
+    const t = Math.max(
+      0,
+      Math.min(1, (this.dartHoverY - minY) / (maxY - minY)),
+    );
+
+    // Desired board hit Y (absolute screen coords)
+    const boardTopHit =
+      this.boardCY - this.boardRadius * HOVER_CFG.BOARD_HIT_TOP_FRAC;
+    const boardBotHit =
+      this.boardCY + this.boardRadius * HOVER_CFG.BOARD_HIT_BOT_FRAC;
+    const desiredTargetY = boardTopHit + t * (boardBotHit - boardTopHit);
+
+    // Convert to normY (inverse of ThrowArcLayer's target formula)
+    // ThrowArcLayer: rawTargetY = boardCY + (1 + normY) * boardRadius * 1.15
+    const normY =
+      (desiredTargetY - this.boardCY) / (this.boardRadius * 1.15) - 1;
+
+    // ── 2. Horizontal aim from dart X offset ─────────────────────────────────
+    const dartOffsetX = this.dartHoverX - W / 2;
+    const desiredTargetX = this.boardCX + dartOffsetX * HOVER_CFG.H_SPREAD;
+    const normX = Math.max(
+      -0.85,
+      Math.min(
+        0.85,
+        (desiredTargetX - this.boardCX) /
+          (this.boardRadius * ARC_CONFIG.powerMultiplier * 1.35),
+      ),
+    );
+
+    const aimData: AimData = {
+      normX,
+      normY,
+      aimAngleDeg: (Math.atan2(normY, normX) * 180) / Math.PI,
+    };
+
+    // ── 3. Power from swipe velocity + pull-back bonus ────────────────────────
+    //
+    // Pull-back: dart dragged below NEUTRAL_Y_FRAC adds up to PULL_BACK_MAX_BONUS.
+    //
+    const neutralY = H * HOVER_CFG.NEUTRAL_Y_FRAC;
+    const pullBackDepth = Math.max(0, this.dartHoverY - neutralY);
+    const pullBackFrac = Math.min(
+      1,
+      pullBackDepth / (H * HOVER_CFG.PULL_BACK_RANGE),
+    );
+    const pullBackBonus = pullBackFrac * HOVER_CFG.PULL_BACK_MAX_BONUS;
+
+    // Normalise velocity → power (PowerLayer curve)
+    const speed = Math.max(POWER_CONFIG.MIN_SPEED, velocityMag);
+    const tLinear =
+      Math.min(speed, POWER_CONFIG.MAX_SPEED) / POWER_CONFIG.MAX_SPEED;
+    const basePower = tLinear ** POWER_CONFIG.CURVE_EXPONENT;
+    const finalPower = Math.min(1.0, basePower + pullBackBonus);
+    const flightDurationMs = Phaser.Math.Linear(
+      POWER_CONFIG.MAX_FLIGHT_MS,
+      POWER_CONFIG.MIN_FLIGHT_MS,
+      finalPower,
+    );
+    const powerData: PowerData = {
+      speed,
+      power: finalPower,
+      flightDurationMs,
+    };
+
+    // ── 4. Vertical upward bias from dart position ────────────────────────────
+    //
+    // Higher dart (low t) = more upward kick at launch = hits top section.
+    // This controls arc height independently of target position.
+    //
+    const upwardBias =
+      HOVER_CFG.UPWARD_BIAS_HIGH +
+      t * (HOVER_CFG.UPWARD_BIAS_LOW - HOVER_CFG.UPWARD_BIAS_HIGH);
+
+    // ── 5. Launch ──────────────────────────────────────────────────────────────
+    this.lastThrowPower = finalPower;
+    this.dartFlying = true;
+    this.trailPoints = [];
+    playThrowSound();
+
+    this.cameraLayer.enterThrow(finalPower);
+    this.time.delayedCall(100, () => {
+      this.cameraLayer.enterFlight(this.dartHoverX, this.dartHoverY);
+    });
+
+    this.spinLayer.reset();
+    // Ensure dart sprite is at hover position before flight begins
+    this.dartSprite.setPosition(this.dartHoverX, this.dartHoverY);
+
+    const arcResult = this.throwArcLayer.launch({
+      scene: this,
+      startX: this.dartHoverX,
+      startY: this.dartHoverY,
+      aim: aimData,
+      power: powerData,
+      boardCX: this.boardCX,
+      boardCY: this.boardCY,
+      boardRadius: this.boardRadius,
+      stability: this.selectedDart.stability,
+      weight: this.selectedDart.weight,
+      upwardBiasOverride: upwardBias,
+      onUpdate: (x, y, vx, vy) => {
+        this.dartX = x;
+        this.dartY = y;
+        this.trailPoints.unshift({ x, y });
+        if (this.trailPoints.length > 9) this.trailPoints.pop();
+        this._redrawTrail();
+        this.spinLayer.updatePosition(x, y, vx, vy);
+        this.cameraLayer.updateFlight(x, y);
+      },
+      onComplete: (tx, ty, impactAngleDeg) => {
+        this.spinLayer.settleOnImpact(this, impactAngleDeg);
+        this.spinLayer.hide();
+
+        this.dartFlying = false;
+        this.dartSettled = true;
+        this.trailPoints = [];
+        this.trailGfx.clear();
+
+        this.cameraLayer.enterImpact(this.lastThrowPower);
+
+        const result = this.impactLayer.process(
+          tx,
+          ty,
+          this.boardCX,
+          this.boardCY,
+          this.boardRadius,
+          this.selectedDart.color,
+        );
+
+        this._onDartLanded(tx, ty, result);
+      },
+    });
+
+    this.spinLayer.startFlight(
+      this,
+      powerData.flightDurationMs,
+      arcResult.impactAngleDeg,
+    );
+
+    // ── Shrinking target ring (Darts of Fury style) ───────────────────────
+    const ringTargetX = arcResult.targetX;
+    const ringTargetY = arcResult.targetY;
+    this.currentRingTween = this.tweens.addCounter({
+      from: 65,
+      to: 4,
+      duration: powerData.flightDurationMs * 0.9,
+      ease: "Sine.easeIn",
+      onUpdate: (tween) => {
+        const ringRadius = tween.getValue() ?? 65;
+        this.targetRingGfx.clear();
+        const progress = (65 - ringRadius) / 61;
+        this.targetRingGfx.lineStyle(2.5, 0xffffff, 0.85 - progress * 0.4);
+        this.targetRingGfx.strokeCircle(ringTargetX, ringTargetY, ringRadius);
+        // Inner glow dot
+        this.targetRingGfx.fillStyle(0xffffff, 0.25);
+        this.targetRingGfx.fillCircle(
+          ringTargetX,
+          ringTargetY,
+          Math.max(2, ringRadius * 0.2),
+        );
+        // Cross-hair lines
+        const cr = Math.max(4, ringRadius * 0.5);
+        this.targetRingGfx.lineStyle(1, 0xffffff, 0.4 - progress * 0.3);
+        this.targetRingGfx.beginPath();
+        this.targetRingGfx.moveTo(ringTargetX - cr, ringTargetY);
+        this.targetRingGfx.lineTo(ringTargetX + cr, ringTargetY);
+        this.targetRingGfx.moveTo(ringTargetX, ringTargetY - cr);
+        this.targetRingGfx.lineTo(ringTargetX, ringTargetY + cr);
+        this.targetRingGfx.strokePath();
+      },
+      onComplete: () => {
+        this.targetRingGfx.clear();
+        // Brief impact flash
+        this.targetRingGfx.fillStyle(0xffffff, 0.7);
+        this.targetRingGfx.fillCircle(ringTargetX, ringTargetY, 16);
+        this.time.delayedCall(100, () => this.targetRingGfx.clear());
+        this.currentRingTween = null;
+      },
+    }) as Phaser.Tweens.Tween;
+  }
+
+  // ── Hover aim indicator ───────────────────────────────────────────────────
+  //
+  // Called every frame from update() while aiming.
+  // Shows a parabolic arc from dart's current hover position to predicted hit.
+  //
+  private _drawHoverAimIndicator() {
     const g = this.aimGfx;
     g.clear();
 
-    const swipeX = px - this.intentStartX;
-    const swipeY = py - this.intentStartY;
-    const swipeDist = Math.sqrt(swipeX * swipeX + swipeY * swipeY);
-    if (swipeDist < 2) return;
+    const H = this.scale.height;
+    const W = this.scale.width;
+    const minY = H * HOVER_CFG.MIN_Y_FRAC;
+    const maxY = H * HOVER_CFG.MAX_Y_FRAC;
+    const t = Math.max(
+      0,
+      Math.min(1, (this.dartHoverY - minY) / (maxY - minY)),
+    );
 
-    // Synthetic input snapshot so aim/power layers can preview
-    const swipeLen = swipeDist || 1;
-    const fakeInput = {
-      startX: this.intentStartX,
-      startY: this.intentStartY,
-      endX: px,
-      endY: py,
-      dirX: swipeX / swipeLen,
-      dirY: swipeY / swipeLen,
-      velocityX: (swipeX / 0.1) * 1000,
-      velocityY: (swipeY / 0.1) * 1000,
-      velocityMag: swipeDist * 6,
-      swipeDistance: swipeDist,
-      swipeDuration: 100,
-      history: [
-        { x: this.intentStartX, y: this.intentStartY, t: 0 },
-        { x: px, y: py, t: 100 },
-      ],
-      isValidThrow: true,
+    // Compute aim data (same logic as _launchFromHover)
+    const boardTopHit =
+      this.boardCY - this.boardRadius * HOVER_CFG.BOARD_HIT_TOP_FRAC;
+    const boardBotHit =
+      this.boardCY + this.boardRadius * HOVER_CFG.BOARD_HIT_BOT_FRAC;
+    const desiredTargetY = boardTopHit + t * (boardBotHit - boardTopHit);
+    const normY =
+      (desiredTargetY - this.boardCY) / (this.boardRadius * 1.15) - 1;
+    const dartOffsetX = this.dartHoverX - W / 2;
+    const normX = Math.max(
+      -0.85,
+      Math.min(
+        0.85,
+        (this.boardCX + dartOffsetX * HOVER_CFG.H_SPREAD - this.boardCX) /
+          (this.boardRadius * ARC_CONFIG.powerMultiplier * 1.35),
+      ),
+    );
+    const aimData: AimData = { normX, normY, aimAngleDeg: 0 };
+
+    // Pull-back bonus for preview power estimate
+    const neutralY = H * HOVER_CFG.NEUTRAL_Y_FRAC;
+    const pullBackBonus = Math.min(
+      HOVER_CFG.PULL_BACK_MAX_BONUS,
+      (Math.max(0, this.dartHoverY - neutralY) /
+        (H * HOVER_CFG.PULL_BACK_RANGE)) *
+        HOVER_CFG.PULL_BACK_MAX_BONUS,
+    );
+
+    // Medium power preview
+    const previewPower: PowerData = {
+      speed: 800,
+      power: Math.max(0.35, Math.min(0.85, 0.5 + pullBackBonus)),
+      flightDurationMs: 420,
     };
-    const aim = this.aimLayer.calculate(fakeInput);
-    const power = this.powerLayer.calculate(fakeInput);
 
-    // Trajectory dots
+    const upwardBias =
+      HOVER_CFG.UPWARD_BIAS_HIGH +
+      t * (HOVER_CFG.UPWARD_BIAS_LOW - HOVER_CFG.UPWARD_BIAS_HIGH);
+
+    // Preview arc dots
     const dots = this.throwArcLayer.previewDots(
-      this.dartStartX,
-      this.dartStartY,
-      aim,
-      power,
+      this.dartHoverX,
+      this.dartHoverY,
+      aimData,
+      previewPower,
+      this.boardCX,
+      this.boardCY,
+      this.boardRadius,
+      10,
+      upwardBias,
     );
     for (const dot of dots) {
       g.fillStyle(0x00e8ff, dot.alpha);
       g.fillCircle(dot.x, dot.y, dot.radius);
     }
 
-    // Power ring on dart
-    const minR = 18;
-    const maxR = 38;
-    const circR = minR + power.power * (maxR - minR);
-    const r = Math.round(power.power * 255);
-    const gb = Math.round(232 - power.power * 100);
-    const ringColor = (r << 16) | (gb << 8) | gb;
-    g.lineStyle(2, ringColor, 0.7);
-    g.strokeCircle(this.dartStartX, this.dartStartY, circR);
-
-    // Aim dot on board
-    const boardAimX = this.boardCX + aim.normX * this.boardRadius * 0.55;
-    const boardAimY = this.boardCY + aim.normY * this.boardRadius * 0.55;
+    // Aim reticle on board showing predicted hit zone
+    const boardAimX = this.boardCX + normX * this.boardRadius * 0.7;
+    // Use (1 + normY) * 0.7 so the reticle maps within the board ring
+    const boardAimY = this.boardCY + (1 + normY) * this.boardRadius * 0.55;
     g.fillStyle(0x00e8ff, 0.45);
     g.fillCircle(boardAimX, boardAimY, 7);
     g.lineStyle(1.5, 0x00e8ff, 0.6);
-    g.strokeCircle(boardAimX, boardAimY, 11);
+    g.strokeCircle(boardAimX, boardAimY, 12);
+
+    // Pull-back power ring around dart
+    if (this.dartHoverY > neutralY + 10) {
+      const ringR = 20 + pullBackBonus * 30;
+      const intensity = pullBackBonus / HOVER_CFG.PULL_BACK_MAX_BONUS;
+      const r = Math.round(255 * intensity);
+      const gb = Math.round(200 - intensity * 100);
+      g.lineStyle(2, (r << 16) | (gb << 8) | gb, 0.7);
+      g.strokeCircle(this.dartHoverX, this.dartHoverY, ringR);
+    }
   }
 
   // ── Landing & scoring ─────────────────────────────────────────────────────
@@ -386,10 +894,10 @@ export default class GameScene extends Phaser.Scene {
     const col = hexColor(this.selectedDart.color);
     this.landings.push({ wx, wy, color: col, label: result.label });
 
-    // Place a landed dart sprite
+    // Place a landed dart sprite at impact angle
     const landed = this.add.image(wx, wy, "dart-sprite");
-    landed.setAngle(-80);
-    landed.setScale(0.18);
+    landed.setAngle(180); // tip up into board, flights toward viewer
+    landed.setScale(0.21);
     landed.setDepth(8);
     landed.setTint(col);
     this.landedDartImages.push(landed);
@@ -413,11 +921,15 @@ export default class GameScene extends Phaser.Scene {
     } else {
       this.time.delayedCall(500, () => {
         this.dartSettled = false;
+        this.isAiming = false;
         this.dartX = this.dartStartX;
         this.dartY = this.dartStartY;
+        this.dartHoverX = this.dartStartX;
+        this.dartHoverY = this.dartStartY;
+        this.dartSprite.setPosition(this.dartStartX, this.dartStartY);
+        this.dartSprite.setAngle(180);
         this.spinLayer.reset();
         this.spinLayer.show();
-        // Camera: return to idle between darts
         this.cameraLayer.enterIdle();
       });
     }
@@ -491,8 +1003,14 @@ export default class GameScene extends Phaser.Scene {
     this.labelText.setText("");
     this.lastScoresText.setText("");
     this.dartSettled = false;
+    this.isAiming = false;
     this.dartX = this.dartStartX;
     this.dartY = this.dartStartY;
+    this.dartHoverX = this.dartStartX;
+    this.dartHoverY = this.dartStartY;
+    this.dartSprite.setPosition(this.dartStartX, this.dartStartY);
+    this.targetRingGfx.clear();
+    this.dartSprite.setAngle(180);
     this.spinLayer.reset();
     this.spinLayer.show();
     this.cameraLayer.enterIdle();
@@ -509,7 +1027,7 @@ export default class GameScene extends Phaser.Scene {
     this.gameOver = true;
     const W = this.scale.width;
     const H = this.scale.height;
-    const overlay = this.add
+    const winOverlay = this.add
       .rectangle(W / 2, H / 2, W, H, 0x000000, 0.65)
       .setDepth(50);
     const win = this.add
@@ -532,7 +1050,7 @@ export default class GameScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(51);
     this.input.once("pointerdown", () => {
-      overlay.destroy();
+      winOverlay.destroy();
       win.destroy();
       sub.destroy();
       this.scene.start("DartSelectionScene");
@@ -555,12 +1073,14 @@ export default class GameScene extends Phaser.Scene {
   }
 
   // ── Board drawing ─────────────────────────────────────────────────────────
+  // All coords are LOCAL to boardContainer (0,0 = container center = boardCX, boardCY)
 
   private _drawBoard() {
     const g = this.boardGfx;
     g.clear();
-    const cx = this.boardCX;
-    const cy = this.boardCY;
+    // Local coords — container is positioned at boardCX, boardCY
+    const cx = 0;
+    const cy = 0;
     const r = this.boardRadius;
 
     const R_BE = r * 0.05;
@@ -570,21 +1090,22 @@ export default class GameScene extends Phaser.Scene {
     const R_DI = r * 0.855;
     const R_DO = r * 0.955;
 
-    for (let i = 4; i >= 1; i--) {
-      g.lineStyle(i * 6, 0x1e3a80, 0.07 * (5 - i));
-      g.strokeCircle(cx, cy, R_DO + i * 9);
+    // Outer glow rings
+    for (let i = 5; i >= 1; i--) {
+      g.lineStyle(i * 7, 0x0088ff, 0.09 * (6 - i));
+      g.strokeCircle(cx, cy, R_DO + i * 10);
     }
-    g.fillStyle(0x050a14, 1);
+
+    // Dark board base
+    g.fillStyle(0x020814, 1);
     g.fillCircle(cx, cy, R_DO);
 
-    const boardBg = this.add.image(cx, cy, "dartboard-bg");
-    boardBg.setDisplaySize(r * 2.1, r * 2.1);
-    boardBg.setAlpha(0.85);
-
+    // Draw segments
     for (let i = 0; i < 20; i++) {
       const sA = (i * 18 - 9 - 90) * (Math.PI / 180);
       const eA = (i * 18 + 9 - 90) * (Math.PI / 180);
       const even = i % 2 === 0;
+
       this._fillSlice(
         g,
         cx,
@@ -593,8 +1114,8 @@ export default class GameScene extends Phaser.Scene {
         R_TI,
         sA,
         eA,
-        even ? 0x050a14 : 0x03060e,
-        0.45,
+        even ? 0x0a1a3a : 0x060f24,
+        0.9,
       );
       this._fillSlice(
         g,
@@ -604,8 +1125,8 @@ export default class GameScene extends Phaser.Scene {
         R_DI,
         sA,
         eA,
-        even ? 0x050a14 : 0x03060e,
-        0.45,
+        even ? 0x0a1a3a : 0x060f24,
+        0.9,
       );
       this._fillSlice(
         g,
@@ -615,8 +1136,8 @@ export default class GameScene extends Phaser.Scene {
         R_TO,
         sA,
         eA,
-        even ? 0x1a7fff : 0x9933ff,
-        0.45,
+        even ? 0x00ccff : 0xff00cc,
+        1.0,
       );
       this._fillSlice(
         g,
@@ -626,17 +1147,21 @@ export default class GameScene extends Phaser.Scene {
         R_DO,
         sA,
         eA,
-        even ? 0xff8800 : 0xcc1133,
-        0.45,
+        even ? 0xff6600 : 0xff0033,
+        1.0,
       );
     }
 
-    g.fillStyle(0xdd4400, 0.6);
+    // Bullseye
+    g.fillStyle(0xff2200, 1.0);
     g.fillCircle(cx, cy, R_BL);
-    g.fillStyle(0xff2200, 0.7);
+    g.fillStyle(0xff6600, 1.0);
     g.fillCircle(cx, cy, R_BE);
+    g.fillStyle(0xffff00, 1);
+    g.fillCircle(cx, cy, R_BE * 0.45);
 
-    g.lineStyle(1.5, 0x1e2a50, 1);
+    // Segment dividers
+    g.lineStyle(1.5, 0x4499ee, 0.9);
     for (let i = 0; i < 20; i++) {
       const angle = (i * 18 - 9 - 90) * (Math.PI / 180);
       g.beginPath();
@@ -644,28 +1169,74 @@ export default class GameScene extends Phaser.Scene {
       g.lineTo(cx + Math.cos(angle) * R_DO, cy + Math.sin(angle) * R_DO);
       g.strokePath();
     }
-    g.lineStyle(1, 0x2a3a60, 0.7);
-    for (const ring of [R_TI, R_TO, R_DI, R_DO, R_BL])
-      g.strokeCircle(cx, cy, ring);
 
+    // Ring outlines — neon glow two-pass
+    // Triple rings glow pass
+    g.lineStyle(6, 0x00eeff, 0.3);
+    for (const ring of [R_TI, R_TO]) g.strokeCircle(cx, cy, ring);
+    g.lineStyle(3, 0x00ffff, 1.0);
+    for (const ring of [R_TI, R_TO]) g.strokeCircle(cx, cy, ring);
+    // Double rings glow pass
+    g.lineStyle(6, 0xff0088, 0.3);
+    for (const ring of [R_DI, R_DO]) g.strokeCircle(cx, cy, ring);
+    g.lineStyle(3, 0xff44aa, 1.0);
+    for (const ring of [R_DI, R_DO]) g.strokeCircle(cx, cy, ring);
+    g.lineStyle(1, 0x334466, 0.6);
+    g.strokeCircle(cx, cy, R_BL);
+
+    // Number labels — added to boardContainer so they squash with the board
     const labelR = R_DO + r * 0.075;
-    const fontSize = Math.max(11, Math.round(r * 0.066));
+    const fontSize = Math.max(12, Math.round(r * 0.068));
     for (let i = 0; i < 20; i++) {
       const angle = (i * 18 - 90) * (Math.PI / 180);
-      this.add
-        .text(
-          cx + Math.cos(angle) * labelR,
-          cy + Math.sin(angle) * labelR,
-          String(SEGMENT_ORDER[i]),
-          {
-            fontSize: `${fontSize}px`,
-            color: "#aaccff",
-            fontFamily: "JetBrains Mono, monospace",
-            stroke: "#000022",
-            strokeThickness: 3,
-          },
-        )
-        .setOrigin(0.5, 0.5);
+      const t = this.add.text(
+        cx + Math.cos(angle) * labelR,
+        cy + Math.sin(angle) * labelR,
+        String(SEGMENT_ORDER[i]),
+        {
+          fontSize: `${fontSize}px`,
+          color: "#ffffff",
+          fontFamily: "JetBrains Mono, monospace",
+          fontStyle: "bold",
+          stroke: "#000022",
+          strokeThickness: 3,
+        },
+      );
+      t.setOrigin(0.5, 0.5);
+      this.boardContainer.add(t);
+    }
+  }
+
+  private _buildStarField() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+    this._starGfx = this.add.graphics().setDepth(-8);
+    const count = 250;
+    for (let i = 0; i < count; i++) {
+      this._stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        r:
+          Math.random() < 0.85
+            ? 0.8 + Math.random() * 1.0
+            : 1.5 + Math.random() * 1.5,
+        baseAlpha: 0.3 + Math.random() * 0.7,
+        phase: Math.random() * Math.PI * 2,
+        speed: 0.5 + Math.random() * 1.5,
+      });
+    }
+  }
+
+  private _updateStars(_delta: number) {
+    const g = this._starGfx;
+    g.clear();
+    const t = this.time.now / 1000;
+    for (const s of this._stars) {
+      const twinkle = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * s.speed + s.phase));
+      const alpha = s.baseAlpha * twinkle;
+      const color = s.r > 1.8 ? 0x88ccff : 0xffffff;
+      g.fillStyle(color, alpha);
+      g.fillCircle(s.x, s.y, s.r);
     }
   }
 
@@ -697,8 +1268,9 @@ export default class GameScene extends Phaser.Scene {
   private _drawPracticeHighlight() {
     const g = this.highlightGfx;
     g.clear();
-    const cx = this.boardCX;
-    const cy = this.boardCY;
+    // Local coords — highlightGfx is in boardContainer
+    const cx = 0;
+    const cy = 0;
     const r = this.boardRadius;
 
     if (this.gameMode === "around-world") {
@@ -747,10 +1319,10 @@ export default class GameScene extends Phaser.Scene {
     for (let i = 0; i < count; i++) {
       const y = byBottom - (i + 1) * (bh + 1.5);
       if (i < filled) {
-        const t = i / count;
-        const red = Math.round(255 * (1 - t));
-        const grn = Math.round(136 + 96 * t);
-        const blu = Math.round(255 * t);
+        const tBlock = i / count;
+        const red = Math.round(255 * (1 - tBlock));
+        const grn = Math.round(136 + 96 * tBlock);
+        const blu = Math.round(255 * tBlock);
         g.fillStyle((red << 16) | (grn << 8) | blu, 1);
       } else {
         g.fillStyle(0x0a1020, 0.7);

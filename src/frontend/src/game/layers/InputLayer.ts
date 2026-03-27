@@ -9,31 +9,38 @@
  *   - Registered with { capture: true, passive: false } for maximum priority
  *   - Calls preventDefault() on every event to block scroll / zoom / gestures
  *   - Tracks a SINGLE active touch by identifier — all other touches ignored
- *   - Phaser's input system is left running but is never the source of truth
+ *
+ * VELOCITY CALCULATION (improved):
+ *   - Stores a rolling history of pointer samples (capped at HISTORY_LIMIT)
+ *   - On release, derives velocity from the most recent VELOCITY_TAIL frames
+ *     weighted toward the LAST sample (recency weighting) so a sharp flick
+ *     at the end of a slow drag is captured correctly.
+ *   - EMA smoothing during drag reduces noise without adding lag.
  *
  * Output event (RawInputData) contains:
- *   - Direction vector
- *   - Velocity magnitude (smoothed)
- *   - Swipe distance
- *   - Swipe duration
+ *   - Direction vector (from total swipe)
+ *   - Velocity magnitude (recency-weighted at release)
+ *   - Swipe distance, duration
  *   - Start / end positions
  *   - Full position history
  *
  * Tuning knobs:
  *   HISTORY_LIMIT      — max pointer samples stored
  *   MIN_DRAG_PX        — minimum movement to register as a throw
- *   VELOCITY_TAIL      — tail samples used for velocity calculation
- *   VELOCITY_SMOOTH    — 0–1 EMA smoothing (0 = no smoothing, 1 = frozen)
+ *   VELOCITY_TAIL      — tail samples used for velocity calculation at release
+ *   VELOCITY_SMOOTH    — 0–1 EMA smoothing during drag (0 = no smooth, 1 = frozen)
+ *   RECENCY_WEIGHT     — how strongly the last frame is weighted (1 = flat, 3 = 3x)
  */
 
 import type Phaser from "phaser";
 
 // ── Tuning ─────────────────────────────────────────────────────────────────
 export const INPUT_CONFIG = {
-  HISTORY_LIMIT: 8, // max pointer samples stored per gesture
-  MIN_DRAG_PX: 15, // minimum drag distance to count as a throw
-  VELOCITY_TAIL: 4, // how many tail samples drive velocity calculation
-  VELOCITY_SMOOTH: 0.25, // EMA alpha — lower = more smoothing
+  HISTORY_LIMIT: 10, // max pointer samples stored per gesture
+  MIN_DRAG_PX: 12, // minimum drag distance to count as a throw
+  VELOCITY_TAIL: 5, // tail samples used for release velocity
+  VELOCITY_SMOOTH: 0.28, // EMA alpha during drag (lower = smoother)
+  RECENCY_WEIGHT: 2.5, // final sample weight multiplier (recency bias)
 } as const;
 
 // ── Output types ────────────────────────────────────────────────────────────
@@ -41,7 +48,7 @@ export const INPUT_CONFIG = {
 export interface PointerSample {
   x: number;
   y: number;
-  t: number; // timestamp ms
+  t: number;
 }
 
 /**
@@ -49,7 +56,6 @@ export interface PointerSample {
  * Every downstream layer reads from this — nothing else reaches them.
  */
 export interface RawInputData {
-  // Positions
   startX: number;
   startY: number;
   endX: number;
@@ -59,55 +65,42 @@ export interface RawInputData {
   dirX: number;
   dirY: number;
 
-  // Velocity (smoothed, px/s)
+  // Velocity (recency-weighted, px/s)
   velocityX: number;
   velocityY: number;
   velocityMag: number;
 
-  // Swipe summary
   swipeDistance: number;
-  swipeDuration: number; // ms from touchstart → touchend
+  swipeDuration: number;
 
-  // Full history for PowerLayer tail sampling
   history: PointerSample[];
-
-  // Gate: did the gesture travel far enough to be a real throw?
   isValidThrow: boolean;
 }
 
 // ── Layer ───────────────────────────────────────────────────────────────────
 
 export class InputLayer {
-  // scene is kept for future use (e.g. coordinate transform if needed)
   private scene: Phaser.Scene;
 
-  // Single-touch gate
   private activeTouchId: number | null = null;
   private active = false;
 
-  // Gesture state
   private startX = 0;
   private startY = 0;
   private startT = 0;
   private history: PointerSample[] = [];
 
-  // EMA-smoothed velocity
+  // EMA-smoothed velocity (used during drag for preview)
   private smoothVX = 0;
   private smoothVY = 0;
 
-  // Bound handlers (stored so we can remove them)
   private _boundStart!: (e: TouchEvent) => void;
   private _boundMove!: (e: TouchEvent) => void;
   private _boundEnd!: (e: TouchEvent) => void;
 
-  // ── Callbacks ─────────────────────────────────────────────────────────────
-  /** Pointer pressed — use for camera engage, haptic, etc. */
   onDown: ((x: number, y: number) => void) | null = null;
-  /** Pointer moving — use for aim indicator updates. */
   onMove: ((x: number, y: number) => void) | null = null;
-  /** Gesture was too short; no throw emitted. */
   onCancel: (() => void) | null = null;
-  /** Valid throw gesture completed — downstream pipeline starts here. */
   onThrow: ((data: RawInputData) => void) | null = null;
 
   constructor(scene: Phaser.Scene) {
@@ -115,11 +108,7 @@ export class InputLayer {
     this._bindHandlers();
   }
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
-
   enable() {
-    // Document-level, capture phase, non-passive → maximum priority
-    // These fire before ANY element (including Phaser canvas) can handle them
     document.addEventListener("touchstart", this._boundStart, {
       capture: true,
       passive: false,
@@ -145,9 +134,7 @@ export class InputLayer {
     document.removeEventListener("touchmove", this._boundMove, {
       capture: true,
     });
-    document.removeEventListener("touchend", this._boundEnd, {
-      capture: true,
-    });
+    document.removeEventListener("touchend", this._boundEnd, { capture: true });
     document.removeEventListener("touchcancel", this._boundEnd, {
       capture: true,
     });
@@ -155,14 +142,9 @@ export class InputLayer {
     this.activeTouchId = null;
   }
 
-  // ── Private ────────────────────────────────────────────────────────────────
-
   private _bindHandlers() {
     this._boundStart = (e: TouchEvent) => {
-      // ALWAYS prevent default — blocks scroll, zoom, magnifier, gestures
       e.preventDefault();
-
-      // Single-touch gate: ignore if we already have an active touch
       if (this.activeTouchId !== null) return;
 
       const touch = e.changedTouches[0];
@@ -181,11 +163,9 @@ export class InputLayer {
     };
 
     this._boundMove = (e: TouchEvent) => {
-      e.preventDefault(); // block scroll / momentum scroll during drag
-
+      e.preventDefault();
       if (!this.active || this.activeTouchId === null) return;
 
-      // Find OUR touch — ignore any additional fingers
       const touch = this._findTouch(e.changedTouches, this.activeTouchId);
       if (!touch) return;
 
@@ -196,10 +176,10 @@ export class InputLayer {
       if (this.history.length > INPUT_CONFIG.HISTORY_LIMIT)
         this.history.shift();
 
+      // EMA smoothing during drag (for aim indicator preview)
       const dt = Math.max(1, now - prev.t);
       const instVX = ((touch.clientX - prev.x) / dt) * 1000;
       const instVY = ((touch.clientY - prev.y) / dt) * 1000;
-
       const a = INPUT_CONFIG.VELOCITY_SMOOTH;
       this.smoothVX = a * instVX + (1 - a) * this.smoothVX;
       this.smoothVY = a * instVY + (1 - a) * this.smoothVY;
@@ -209,13 +189,11 @@ export class InputLayer {
 
     this._boundEnd = (e: TouchEvent) => {
       e.preventDefault();
-
       if (!this.active || this.activeTouchId === null) return;
 
       const touch = this._findTouch(e.changedTouches, this.activeTouchId);
       if (!touch) return;
 
-      // Release the lock immediately so the next touch can be registered
       this.activeTouchId = null;
       this.active = false;
 
@@ -230,15 +208,31 @@ export class InputLayer {
         return;
       }
 
-      // Final velocity — recalculate from tail for accuracy
+      // ── Recency-weighted velocity at release ──────────────────────────────
+      // The last VELOCITY_TAIL samples are used. The MOST RECENT interval is
+      // weighted by RECENCY_WEIGHT so a sharp flick at the end of a slow drag
+      // is captured accurately rather than diluted by earlier slow movement.
       const tail = this.history.slice(-INPUT_CONFIG.VELOCITY_TAIL);
-      let finalVX = this.smoothVX;
-      let finalVY = this.smoothVY;
-      if (tail.length >= 2) {
-        const tailDt = Math.max(10, tail[tail.length - 1].t - tail[0].t);
-        finalVX = ((tail[tail.length - 1].x - tail[0].x) / tailDt) * 1000;
-        finalVY = ((tail[tail.length - 1].y - tail[0].y) / tailDt) * 1000;
+      let wVX = 0;
+      let wVY = 0;
+      let wTotal = 0;
+
+      for (let i = 1; i < tail.length; i++) {
+        const segDt = Math.max(1, tail[i].t - tail[i - 1].t);
+        const segVX = ((tail[i].x - tail[i - 1].x) / segDt) * 1000;
+        const segVY = ((tail[i].y - tail[i - 1].y) / segDt) * 1000;
+        // Linear ramp: weight increases toward the final segment
+        const rawW = i / (tail.length - 1);
+        // Apply recency boost to the last segment
+        const w =
+          i === tail.length - 1 ? rawW * INPUT_CONFIG.RECENCY_WEIGHT : rawW;
+        wVX += segVX * w;
+        wVY += segVY * w;
+        wTotal += w;
       }
+
+      const finalVX = wTotal > 0 ? wVX / wTotal : this.smoothVX;
+      const finalVY = wTotal > 0 ? wVY / wTotal : this.smoothVY;
       const velocityMag = Math.sqrt(finalVX * finalVX + finalVY * finalVY);
 
       const dirLen = swipeDistance || 1;
@@ -265,7 +259,6 @@ export class InputLayer {
     };
   }
 
-  /** Find a touch with a specific identifier in a TouchList */
   private _findTouch(list: TouchList, id: number): Touch | null {
     for (let i = 0; i < list.length; i++) {
       if (list[i].identifier === id) return list[i];
