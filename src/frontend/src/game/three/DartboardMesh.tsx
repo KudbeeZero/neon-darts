@@ -6,6 +6,7 @@ import { BOARD_RADIUS, BOARD_Y_OFFSET, BOARD_Z } from "../core/ArcPlanner";
 export interface DartboardMeshProps {
   highlightSegment?: number;
   highlightRing?: "single" | "double" | "triple" | "bull" | null;
+  boardScale?: number;
 }
 
 const IMAGE_URL =
@@ -14,6 +15,7 @@ const IMAGE_URL =
 const DartboardMesh = memo(function DartboardMesh({
   highlightSegment = 0,
   highlightRing = null,
+  boardScale = 1.0,
 }: DartboardMeshProps) {
   const overlayMatRef = useRef<THREE.MeshBasicMaterial>(null);
 
@@ -34,7 +36,10 @@ const DartboardMesh = memo(function DartboardMesh({
   });
 
   return (
-    <group position={[0, BOARD_Y_OFFSET, BOARD_Z]}>
+    <group
+      position={[0, BOARD_Y_OFFSET, BOARD_Z]}
+      scale={[boardScale, boardScale, 1]}
+    >
       {/* Board back */}
       <mesh position={[0, 0, -0.015]}>
         <circleGeometry args={[R * 1.12, 64]} />

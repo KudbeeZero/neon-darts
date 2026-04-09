@@ -8,8 +8,15 @@ const HUD_STYLES = `
     0%, 100% { border-color: rgba(0,200,255,0.7); box-shadow: 0 0 12px rgba(0,200,255,0.3); }
     50% { border-color: rgba(0,200,255,0.3); box-shadow: 0 0 4px rgba(0,200,255,0.1); }
   }
+  @keyframes targetPulse {
+    0%, 100% { border-color: rgba(255,170,0,0.8); box-shadow: 0 0 16px rgba(255,170,0,0.4); }
+    50% { border-color: rgba(255,170,0,0.4); box-shadow: 0 0 6px rgba(255,170,0,0.15); }
+  }
   .hud-aiming-pill {
     animation: borderPulse 1.4s ease-in-out infinite;
+  }
+  .hud-target-badge {
+    animation: targetPulse 1.2s ease-in-out infinite;
   }
 `;
 
@@ -72,6 +79,10 @@ export default function HUD({
   }, [showPopup]);
 
   const isMode301 = modeState.type === "301";
+  const isPractice = !isMode301;
+
+  // For practice modes, show current target prominently
+  const targetDisplay = isPractice ? modeState.targetLabel : null;
 
   return (
     <>
@@ -114,21 +125,53 @@ export default function HUD({
           </div>
           <div
             style={{
-              color: "#ffffff",
+              color: modeState.isBust ? "#ff4400" : "#ffffff",
               fontSize: isMode301 ? 38 : 26,
               fontWeight: 700,
               lineHeight: 1.1,
-              textShadow: "0 0 16px #00ddff, 0 0 32px #00aaff",
+              textShadow: modeState.isBust
+                ? "0 0 16px #ff4400"
+                : "0 0 16px #00ddff, 0 0 32px #00aaff",
             }}
           >
             {isMode301 ? modeState.score : modeState.targetLabel}
           </div>
-          {!isMode301 && (
+          {isMode301 && (
+            <div style={{ color: "#666688", fontSize: 11, marginTop: 2 }}>
+              Round {modeState.round}
+            </div>
+          )}
+          {isPractice && (
             <div style={{ color: "#aaaacc", fontSize: 11, marginTop: 2 }}>
               {modeState.score}/20 hit
             </div>
           )}
         </div>
+
+        {/* Target badge — practice modes only, below score panel */}
+        {isPractice && targetDisplay && modeState.target <= 20 && (
+          <div
+            className="hud-target-badge"
+            style={{
+              position: "absolute",
+              top: 120,
+              left: 16,
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              background: "rgba(0,0,20,0.7)",
+              border: "1px solid rgba(255,170,0,0.8)",
+              borderRadius: 10,
+              padding: "6px 14px",
+              color: "#ffaa00",
+              fontSize: 20,
+              fontWeight: 900,
+              textShadow: "0 0 12px #ffaa00",
+              letterSpacing: 1,
+            }}
+          >
+            🎯 {targetDisplay}
+          </div>
+        )}
 
         {/* Darts left — top right */}
         <div

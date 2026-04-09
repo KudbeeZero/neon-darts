@@ -5,205 +5,257 @@ export interface DartMeshHandle {
   group: THREE.Group | null;
   setFlightRoll: (t: number) => void;
   setBarrelRoll: (angle: number) => void;
+  setDartScale: (scale: number) => void;
 }
 
-// Flight wing shape — swept-back arrow, wider and bolder than before
-function createFlightShape(): THREE.ShapeGeometry {
+// ── Flight fin — simple PlaneGeometry-based fin with DoubleSide material ──────
+// Using ShapeGeometry for a clean swept-back triangular fin.
+// DoubleSide prevents any backface-culling pink artifact.
+function createFinGeometry(): THREE.ShapeGeometry {
+  // Fin shape in local XY space:
+  //   Origin = attachment at hub (bottom of fin)
+  //   Fin sweeps backward (+Y = away from barrel tip, toward player)
+  //   Width tapers from wide at base to a point at the tip
   const shape = new THREE.Shape();
-  shape.moveTo(0, 0);
-  shape.lineTo(0.055, 0.155);
-  shape.lineTo(0.015, 0.072);
-  shape.lineTo(0.015, 0);
-  shape.closePath();
-  return new THREE.ShapeGeometry(shape);
+  // Start at root-left
+  shape.moveTo(-0.022, 0);
+  // Sweep out to max width at mid-fin
+  shape.lineTo(-0.038, 0.055);
+  // Taper to tip
+  shape.lineTo(-0.01, 0.1);
+  // Tip point
+  shape.lineTo(0, 0.1);
+  // Mirror right side
+  shape.lineTo(0.01, 0.1);
+  shape.lineTo(0.038, 0.055);
+  // Back to root-right
+  shape.lineTo(0.022, 0);
+  // Close back to root-left
+  shape.lineTo(-0.022, 0);
+
+  return new THREE.ShapeGeometry(shape, 4);
+}
+
+// ── Knurl ring shape for lathe geometry ───────────────────────────────────────
+function createKnurlPoints(
+  baseRadius: number,
+  knurlHeight: number,
+  depth: number,
+  segments: number,
+): THREE.Vector2[] {
+  const pts: THREE.Vector2[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const frac = i / segments;
+    const r = baseRadius + Math.sin(frac * Math.PI) * depth;
+    pts.push(new THREE.Vector2(r, (frac - 0.5) * knurlHeight));
+  }
+  return pts;
 }
 
 const DartMesh = forwardRef<DartMeshHandle, object>(function DartMesh(_, ref) {
   const groupRef = useRef<THREE.Group>(null);
-  const f1aRef = useRef<THREE.Mesh>(null);
-  const f1bRef = useRef<THREE.Mesh>(null);
-  const f2aRef = useRef<THREE.Mesh>(null);
-  const f2bRef = useRef<THREE.Mesh>(null);
 
-  const flightGeo = useMemo(() => createFlightShape(), []);
+  // 4 flight wing refs — rotated 90° apart around Z-axis
+  const f1Ref = useRef<THREE.Mesh>(null); // top    (cyan)
+  const f2Ref = useRef<THREE.Mesh>(null); // right  (magenta)
+  const f3Ref = useRef<THREE.Mesh>(null); // bottom (cyan)
+  const f4Ref = useRef<THREE.Mesh>(null); // left   (magenta)
+
+  const flightGeo = useMemo(() => createFinGeometry(), []);
+
+  // 3 knurl rings — subtle ridges on the barrel
+  const knurlGeos = useMemo(() => {
+    return [0.02, 0.08, 0.14].map(() => {
+      const pts = createKnurlPoints(0.022, 0.012, 0.003, 8);
+      return new THREE.LatheGeometry(pts, 14);
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({
     get group() {
       return groupRef.current;
     },
-    // Barrel roll active throughout entire flight
+    // Barrel roll: spin flights around dart Z-axis
     setFlightRoll(t: number) {
-      const angle = t * Math.PI * 12;
-      const refs = [f1aRef, f1bRef, f2aRef, f2bRef];
+      // Speed is π*8 — fed from R3FGame which controls accumulation
+      const refs = [f1Ref, f2Ref, f3Ref, f4Ref];
       refs.forEach((r, i) => {
         if (r.current) {
-          r.current.rotation.z = (Math.PI / 2) * i + angle;
+          r.current.rotation.z = (Math.PI / 2) * i + t;
         }
       });
     },
     setBarrelRoll(angle: number) {
-      const refs = [f1aRef, f1bRef, f2aRef, f2bRef];
+      const refs = [f1Ref, f2Ref, f3Ref, f4Ref];
       refs.forEach((r, i) => {
         if (r.current) {
           r.current.rotation.z = (Math.PI / 2) * i + angle;
         }
       });
     },
+    setDartScale(scale: number) {
+      if (groupRef.current) {
+        groupRef.current.scale.setScalar(scale);
+      }
+    },
   }));
 
-  // Scale 5.0x — large foreground dart matching Darts of Fury
-  // Position: low and close to camera so it fills lower portion of screen
+  // ── DART GEOMETRY ────────────────────────────────────────────────────────
+  //
+  // LOCAL Z-AXIS CONVENTION:
+  //   -Z = toward the board (tip points this way)
+  //   +Z = toward the player (flights extend this way)
+  //
+  // Scale is 1.8 (down from 5.5 — fixes the cannon-barrel problem).
+  // At scale 1.8:
+  //   barrel radius 0.022 → 0.040 world units (slim, correct)
+  //   tip is a sharp prominent cone
+  //   flights are large and visible in foreground
+
   return (
-    <group ref={groupRef} position={[0, -1.2, 2.8]} scale={[5.0, 5.0, 5.0]}>
-      {/* ── TIP ── */}
-      <mesh position={[0, 0, -0.005]}>
-        <coneGeometry args={[0.004, 0.055, 10]} />
+    <group
+      ref={groupRef}
+      position={[0, -1.1, 2.2]}
+      scale={[1.8, 1.8, 1.8]}
+      rotation={[-0.3, 0, 0]} // tip tilted slightly upward toward board when idle
+    >
+      {/* ── TIP — sharp prominent point ── */}
+      <mesh position={[0, 0, -0.22]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.012, 0.12, 12]} />
         <meshStandardMaterial
-          color="#e8e8f4"
+          color="#cccccc"
           metalness={1.0}
-          roughness={0.02}
-          emissive="#bbbbdd"
-          emissiveIntensity={0.15}
+          roughness={0.1}
+          emissive="#aaaacc"
+          emissiveIntensity={0.3}
         />
       </mesh>
 
-      {/* ── FRONT TAPER ── */}
-      <mesh position={[0, 0, 0.055]}>
-        <cylinderGeometry args={[0.004, 0.018, 0.06, 12]} />
+      {/* ── FRONT TAPER — tip to barrel transition ── */}
+      <mesh position={[0, 0, -0.135]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.022, 0.06, 14]} />
+        <meshStandardMaterial color="#2a2a35" metalness={0.9} roughness={0.3} />
+      </mesh>
+
+      {/* ── BARREL — main tungsten body ── */}
+      <mesh position={[0, 0, 0.06]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.022, 0.022, 0.2, 16]} />
         <meshStandardMaterial
-          color="#c8c8e0"
-          metalness={0.98}
-          roughness={0.05}
+          color="#2a2a35"
+          metalness={0.9}
+          roughness={0.3}
+          emissive="#080818"
+          emissiveIntensity={0.2}
         />
       </mesh>
 
-      {/* ── BARREL ── */}
-      <mesh position={[0, 0, 0.135]}>
-        <cylinderGeometry args={[0.019, 0.017, 0.19, 16]} />
-        <meshStandardMaterial
-          color="#18182a"
-          metalness={0.97}
-          roughness={0.06}
-          emissive="#111133"
-          emissiveIntensity={0.45}
-        />
-      </mesh>
-
-      {/* Barrel highlight stripe */}
-      <mesh position={[0, 0, 0.13]}>
-        <cylinderGeometry args={[0.021, 0.021, 0.045, 16]} />
-        <meshStandardMaterial
-          color="#99aaff"
-          metalness={1.0}
-          roughness={0.0}
-          emissive="#99aaff"
-          emissiveIntensity={0.6}
-          transparent
-          opacity={0.65}
-        />
-      </mesh>
-
-      {/* Knurl rings ×5 */}
-      {[0.07, 0.1, 0.13, 0.16, 0.19].map((z) => (
-        <mesh key={z} position={[0, 0, z]}>
-          <cylinderGeometry args={[0.022, 0.022, 0.009, 14]} />
+      {/* ── KNURL RINGS ×3 — subtle grip ridges ── */}
+      {[0.02, 0.08, 0.14].map((z, idx) => (
+        <mesh key={z} position={[0, 0, z]} rotation={[Math.PI / 2, 0, 0]}>
+          <primitive object={knurlGeos[idx]} />
           <meshStandardMaterial
             color="#aaaacc"
             metalness={1.0}
-            roughness={0.05}
-            emissive="#6677bb"
+            roughness={0.1}
+            emissive="#5566aa"
             emissiveIntensity={0.25}
           />
         </mesh>
       ))}
 
-      {/* ── REAR TAPER ── */}
-      <mesh position={[0, 0, 0.24]}>
-        <cylinderGeometry args={[0.011, 0.019, 0.052, 12]} />
-        <meshStandardMaterial
-          color="#2a2a40"
-          metalness={0.95}
-          roughness={0.08}
-        />
+      {/* ── REAR TAPER — barrel narrows toward shaft ── */}
+      <mesh position={[0, 0, 0.21]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.012, 0.06, 12]} />
+        <meshStandardMaterial color="#2a2a35" metalness={0.9} roughness={0.3} />
       </mesh>
 
-      {/* ── SHAFT / STEM ── */}
-      <mesh position={[0, 0, 0.295]}>
-        <cylinderGeometry args={[0.005, 0.009, 0.082, 10]} />
+      {/* ── SHAFT — slim connector ── */}
+      <mesh position={[0, 0, 0.29]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.005, 0.005, 0.1, 10]} />
         <meshStandardMaterial
-          color="#1e1e30"
+          color="#1a1a2e"
           metalness={0.9}
+          roughness={0.15}
+          emissive="#000066"
+          emissiveIntensity={0.4}
+        />
+      </mesh>
+
+      {/* ── FLIGHT HUB — connects shaft to flights ── */}
+      <mesh position={[0, 0, 0.35]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.009, 0.009, 0.02, 10]} />
+        <meshStandardMaterial color="#0d0d1e" metalness={0.9} roughness={0.2} />
+      </mesh>
+
+      {/* ── FLIGHTS (4-wing fins with DoubleSide material) ──
+           Fins attach at hub (z=0.35), sweep backward toward player (+Z).
+           ShapeGeometry lies in XY plane by default.
+           We rotate [π/2, 0, 0] to stand the fin up along the dart Z-axis,
+           then each wing rotates around Z to fan out 90° apart.
+           DoubleSide: prevents any backface / pink polygon artifact.
+      ── */}
+
+      {/* Wing 1 — TOP — CYAN ── 0° */}
+      <mesh ref={f1Ref} position={[0, 0, 0.35]} rotation={[Math.PI / 2, 0, 0]}>
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#00ffff"
+          emissive="#00ffff"
+          emissiveIntensity={2.0}
           roughness={0.1}
-          emissive="#0022aa"
-          emissiveIntensity={0.25}
+          metalness={0.1}
+          side={THREE.DoubleSide}
         />
       </mesh>
 
-      {/* ── FLIGHT HUB ── */}
-      <mesh position={[0, 0, 0.342]}>
-        <cylinderGeometry args={[0.008, 0.008, 0.013, 8]} />
-        <meshStandardMaterial color="#111122" metalness={0.9} roughness={0.2} />
+      {/* Wing 2 — RIGHT — MAGENTA ── 90° */}
+      <mesh
+        ref={f2Ref}
+        position={[0, 0, 0.35]}
+        rotation={[Math.PI / 2, 0, Math.PI / 2]}
+      >
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#ff00ff"
+          emissive="#ff00ff"
+          emissiveIntensity={2.0}
+          roughness={0.1}
+          metalness={0.1}
+          side={THREE.DoubleSide}
+        />
       </mesh>
 
-      {/* ── FLIGHTS (4-wing) ── */}
-      <mesh ref={f1aRef} position={[0, 0, 0.342]}>
-        <primitive object={flightGeo} />
-        <meshStandardMaterial
-          color="#00ccff"
-          emissive="#00ccff"
-          emissiveIntensity={1.4}
-          side={THREE.DoubleSide}
-          transparent
-          opacity={0.94}
-          roughness={0.12}
-          metalness={0.08}
-        />
-      </mesh>
-      <mesh ref={f1bRef} position={[0, 0, 0.342]} rotation={[0, 0, Math.PI]}>
-        <primitive object={flightGeo} />
-        <meshStandardMaterial
-          color="#00ccff"
-          emissive="#00ccff"
-          emissiveIntensity={1.4}
-          side={THREE.DoubleSide}
-          transparent
-          opacity={0.94}
-          roughness={0.12}
-          metalness={0.08}
-        />
-      </mesh>
+      {/* Wing 3 — BOTTOM — CYAN ── 180° */}
       <mesh
-        ref={f2aRef}
-        position={[0, 0, 0.342]}
-        rotation={[0, 0, Math.PI / 2]}
+        ref={f3Ref}
+        position={[0, 0, 0.35]}
+        rotation={[Math.PI / 2, 0, Math.PI]}
       >
         <primitive object={flightGeo} />
         <meshStandardMaterial
-          color="#ff0088"
-          emissive="#ff0088"
-          emissiveIntensity={1.4}
+          color="#00ffff"
+          emissive="#00ffff"
+          emissiveIntensity={2.0}
+          roughness={0.1}
+          metalness={0.1}
           side={THREE.DoubleSide}
-          transparent
-          opacity={0.94}
-          roughness={0.12}
-          metalness={0.08}
         />
       </mesh>
+
+      {/* Wing 4 — LEFT — MAGENTA ── 270° */}
       <mesh
-        ref={f2bRef}
-        position={[0, 0, 0.342]}
-        rotation={[0, 0, -Math.PI / 2]}
+        ref={f4Ref}
+        position={[0, 0, 0.35]}
+        rotation={[Math.PI / 2, 0, -Math.PI / 2]}
       >
         <primitive object={flightGeo} />
         <meshStandardMaterial
-          color="#ff0088"
-          emissive="#ff0088"
-          emissiveIntensity={1.4}
+          color="#ff00ff"
+          emissive="#ff00ff"
+          emissiveIntensity={2.0}
+          roughness={0.1}
+          metalness={0.1}
           side={THREE.DoubleSide}
-          transparent
-          opacity={0.94}
-          roughness={0.12}
-          metalness={0.08}
         />
       </mesh>
     </group>

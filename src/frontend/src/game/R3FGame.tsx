@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 
+import { dartAudio } from "./DartAudio";
 import TouchLayer from "./input/TouchLayer";
 import DartMesh, { type DartMeshHandle } from "./three/DartMesh";
 import DartboardMesh from "./three/DartboardMesh";
@@ -16,6 +17,7 @@ import { DART_START, type PlannedThrow } from "./core/ArcPlanner";
 import {
   type GameModeType,
   type ModeState,
+  advanceRound,
   createInitialState,
   processThrow,
 } from "./core/GameModes";
@@ -81,6 +83,7 @@ interface GameSceneProps {
   onImpact: (zone: ZoneResult) => void;
   modeState: ModeState;
   aimOffsetRef: React.RefObject<{ x: number; y: number }>;
+  boardScale: number;
 }
 
 function GameScene({
@@ -89,6 +92,7 @@ function GameScene({
   onImpact,
   modeState,
   aimOffsetRef,
+  boardScale,
 }: GameSceneProps) {
   const dartRef = useRef<DartMeshHandle>(null);
   const ringRef = useRef<THREE.Mesh>(null);
@@ -106,18 +110,19 @@ function GameScene({
     if (gameState !== "throwing" || !currentThrow) return;
     throwAnimRef.current = new ThrowAnimation(currentThrow, Date.now());
     trailPositionsRef.current = [];
-    // Cinematic zoom only for perfect shots (bullseye / bull / triple 20)
-    if (currentThrow.isPerfect) {
-      cameraRef.current?.startThrow(
-        currentThrow.landingPos3D,
-        currentThrow.flightMs,
-      );
-    }
+    // Every throw gets push-in; perfect shots get dramatic zoom
+    cameraRef.current?.startThrow(
+      currentThrow.landingPos3D,
+      currentThrow.flightMs,
+      currentThrow.isPerfect,
+    );
   }, [currentThrow, gameState]);
 
   useEffect(() => {
     if (gameState === "aiming" && dartRef.current?.group) {
       dartRef.current.group.position.copy(DART_START);
+      // Reset scale back to base for aiming position
+      dartRef.current.setDartScale(1.8);
       // Tilt tip upward ~25 deg so it looks like a natural dart grip
       const readyQuat = new THREE.Quaternion();
       readyQuat.setFromEuler(new THREE.Euler(Math.PI / 7.5, 0, 0));
@@ -152,16 +157,22 @@ function GameScene({
       dartRef.current.group.position.copy(result.position);
       dartRef.current.group.quaternion.copy(result.quaternion);
 
+      // Perspective-based scale: dart starts large at Z=2.2 (close to camera)
+      // Board zoom creates the depth illusion — dart shrinks more subtly here.
+      // Scale from 1.8 (t=0) down to 1.0 (t=1) — stays visible throughout flight.
+      const flightScale = 1.8 - 0.8 * result.t;
+      dartRef.current.setDartScale(flightScale);
+
       const positions = trailPositionsRef.current;
       positions.unshift(result.position.clone());
       if (positions.length > 8) positions.pop();
     }
 
-    // Barrel roll active throughout ENTIRE flight — early build defining feel
-    // angle = t * BARREL_ROLL_SPEED (12π = 6 full rotations)
-    dartRef.current?.setFlightRoll(
-      result.t * (BARREL_ROLL_SPEED / (Math.PI * 12)),
-    );
+    // Barrel roll: ONLY during descent phase (dart falling toward board).
+    // Pass result.t * BARREL_ROLL_SPEED so DartMesh.setFlightRoll receives the angle directly.
+    if (result.isDescending) {
+      dartRef.current?.setFlightRoll(result.t * BARREL_ROLL_SPEED);
+    }
 
     if (ringRef.current) {
       // Start at scale 1.2, shrink to 0 over full flight duration
@@ -210,6 +221,7 @@ function GameScene({
       <DartboardMesh
         highlightSegment={highlightSegment}
         highlightRing={highlightRing}
+        boardScale={boardScale}
       />
       <DartMesh ref={dartRef} />
       {currentThrow && <TargetRing ref={ringRef} position={ringPos} />}
@@ -240,11 +252,51 @@ export default function R3FGame() {
   const [lastZone, setLastZone] = useState<ZoneResult | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [impactFlash, setImpactFlash] = useState<string | null>(null);
+  const [boardScale, setBoardScale] = useState(1.0);
   const impactFlashKey = useRef(0);
   const transitioning = useRef(false);
   const aimOffsetRef = useRef({ x: 0, y: 0 });
+  const boardScaleRef = useRef(1.0);
+  const boardScaleAnimRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Smoothly animate boardScale toward a target value using a ref-tracked start
+  const animateBoardScale = useCallback(
+    (target: number, durationMs: number) => {
+      if (boardScaleAnimRef.current) clearInterval(boardScaleAnimRef.current);
+      const startTime = Date.now();
+      const startScale = boardScaleRef.current;
+      const TICK = 16; // ~60fps
+      boardScaleAnimRef.current = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const rawT = Math.min(1, elapsed / durationMs);
+        // smoothstep easing
+        const t = rawT * rawT * (3 - 2 * rawT);
+        const next = startScale + (target - startScale) * t;
+        boardScaleRef.current = next;
+        setBoardScale(next);
+        if (rawT >= 1) {
+          if (boardScaleAnimRef.current)
+            clearInterval(boardScaleAnimRef.current);
+          boardScaleAnimRef.current = null;
+        }
+      }, TICK);
+    },
+    [],
+  );
+
+  // Restore intro music when returning to menu from round-over or game
+  // (also handles initial load — menu is the default state)
+  useEffect(() => {
+    if (gameState === "menu") {
+      dartAudio.playIntro();
+    }
+  }, [gameState]);
 
   const handleStart = useCallback((mode: GameModeType) => {
+    // Unlock audio context on first user interaction (satisfies browser autoplay policy)
+    dartAudio.unlock();
+    // Fade out intro music as the game starts
+    dartAudio.stopIntro();
     setModeState(createInitialState(mode));
     setDartsLeft(3);
     setCurrentThrow(null);
@@ -262,8 +314,11 @@ export default function R3FGame() {
       aimOffsetRef.current = { x: 0, y: 0 };
       setCurrentThrow(pt);
       setGameState("throwing");
+      // Zoom board toward player during flight — Darts of Fury illusion
+      const targetScale = pt.isPerfect ? 1.45 : 1.25;
+      animateBoardScale(targetScale, pt.flightMs);
     },
-    [gameState],
+    [gameState, animateBoardScale],
   );
 
   const handleAimUpdate = useCallback((normX: number, normY: number) => {
@@ -291,30 +346,49 @@ export default function R3FGame() {
       setLastZone(zone);
       setShowPopup(true);
 
+      // Play impact sound — unlocked on first touch, safe on all browsers
+      dartAudio.playImpact(zone);
+
+      // Process the throw and update mode state
       setModeState((prev) => {
         const { newState } = processThrow(zone, prev);
         return newState;
       });
-      setGameState("embedded");
 
+      setGameState("embedded");
       const nextDartsLeft = dartsLeft - 1;
       setDartsLeft(nextDartsLeft);
+      // Board zooms back out after impact over 700ms
+      animateBoardScale(1.0, 700);
 
       setTimeout(() => {
         setShowPopup(false);
         setModeState((ms) => {
-          if (ms.isComplete || nextDartsLeft <= 0) {
+          // Game complete → show win screen
+          if (ms.isComplete) {
             setGameState("round_over");
-          } else {
-            aimOffsetRef.current = { x: 0, y: 0 };
-            setGameState("aiming");
+            transitioning.current = false;
+            return ms;
           }
+
+          // Round ended (3 darts thrown) → show round summary, then start new round
+          if (nextDartsLeft <= 0) {
+            const advanced = advanceRound(ms);
+            setDartsLeft(3);
+            setGameState("round_over");
+            transitioning.current = false;
+            return advanced;
+          }
+
+          // More darts to throw this round — keep going
+          aimOffsetRef.current = { x: 0, y: 0 };
+          setGameState("aiming");
           transitioning.current = false;
           return ms;
         });
       }, 1600);
     },
-    [dartsLeft],
+    [dartsLeft, animateBoardScale],
   );
 
   const handlePlayAgain = useCallback(() => {
@@ -367,15 +441,15 @@ export default function R3FGame() {
       {/* 3-D Canvas */}
       <Canvas
         style={{ position: "absolute", inset: 0, zIndex: 2 }}
-        camera={{ fov: 65, position: [0, 0.3, 4.5], near: 0.05, far: 60 }}
+        camera={{ fov: 62, position: [0, 0.5, 4.8], near: 0.05, far: 60 }}
         gl={{
           antialias: true,
           powerPreference: "high-performance",
           alpha: true,
         }}
         onCreated={({ camera, gl }) => {
-          // Look slightly upward toward the board — board sits in upper screen
-          camera.lookAt(0, 0.5, 0);
+          // Look toward upper-center — board sits in upper 55-60% of screen like DoF
+          camera.lookAt(0, 0.4, 0);
           gl.setClearColor(0x000000, 0);
         }}
       >
@@ -385,6 +459,7 @@ export default function R3FGame() {
           onImpact={handleImpact}
           modeState={modeState}
           aimOffsetRef={aimOffsetRef}
+          boardScale={boardScale}
         />
       </Canvas>
 
@@ -479,54 +554,136 @@ export default function R3FGame() {
               gap: 16,
             }}
           >
-            <div
-              style={{
-                fontSize: 38,
-                fontWeight: 800,
-                color: modeState.isComplete ? "#00ddff" : "#ff8800",
-                textShadow: modeState.isComplete
-                  ? "0 0 24px #00ddff"
-                  : "0 0 20px #ff8800",
-                textAlign: "center",
-              }}
-            >
-              {modeState.isComplete ? "🏆 YOU WIN!" : "Round Over"}
-            </div>
-
-            {modeState.type === "301" && (
-              <div
-                style={{
-                  color: "#aaaacc",
-                  fontSize: 18,
-                  textAlign: "center",
-                }}
-              >
-                {modeState.isComplete
-                  ? "Perfect!"
-                  : `${modeState.score} remaining`}
-              </div>
+            {modeState.isComplete ? (
+              <>
+                {/* WIN SCREEN */}
+                <motion.div
+                  initial={{ scale: 0.5, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: "spring", stiffness: 200, delay: 0.1 }}
+                  style={{
+                    fontSize: 64,
+                    fontWeight: 900,
+                    color: "#00ddff",
+                    textShadow: "0 0 40px #00ddff, 0 0 80px #0088ff",
+                    textAlign: "center",
+                    letterSpacing: -1,
+                  }}
+                >
+                  🏆 YOU WIN!
+                </motion.div>
+                <div
+                  style={{
+                    color: "#aaaacc",
+                    fontSize: 18,
+                    textAlign: "center",
+                  }}
+                >
+                  {modeState.type === "301"
+                    ? "Checked out in perfect!"
+                    : `All ${modeState.score}/20 hit!`}
+                </div>
+                <div style={{ color: "#666688", fontSize: 14 }}>
+                  Round {modeState.round}
+                </div>
+              </>
+            ) : (
+              <>
+                {/* ROUND OVER SCREEN */}
+                <div
+                  style={{
+                    fontSize: 38,
+                    fontWeight: 800,
+                    color: modeState.isBust ? "#ff4400" : "#ff8800",
+                    textShadow: modeState.isBust
+                      ? "0 0 24px #ff4400"
+                      : "0 0 20px #ff8800",
+                    textAlign: "center",
+                  }}
+                >
+                  {modeState.isBust
+                    ? "💥 BUST!"
+                    : `Round ${modeState.round - 1} Over`}
+                </div>
+                {modeState.type === "301" && (
+                  <div
+                    style={{
+                      color: "#aaaacc",
+                      fontSize: 18,
+                      textAlign: "center",
+                    }}
+                  >
+                    {modeState.isBust
+                      ? `Score reverted — ${modeState.score} remaining`
+                      : `${modeState.score} remaining`}
+                  </div>
+                )}
+                {modeState.type !== "301" && (
+                  <div
+                    style={{
+                      color: "#aaaacc",
+                      fontSize: 16,
+                      textAlign: "center",
+                    }}
+                  >
+                    {`Next: ${modeState.targetLabel}`}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  data-ocid="round_over.next_round.button"
+                  onClick={() => {
+                    aimOffsetRef.current = { x: 0, y: 0 };
+                    setDartsLeft(3);
+                    setGameState("aiming");
+                  }}
+                  style={{
+                    background: "linear-gradient(135deg, #00bbdd, #0044ff)",
+                    border: "none",
+                    borderRadius: 12,
+                    padding: "14px 40px",
+                    color: "white",
+                    fontSize: 18,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    boxShadow: "0 0 24px rgba(0,170,255,0.5)",
+                    fontFamily: "inherit",
+                    marginTop: 8,
+                  }}
+                >
+                  Next Round →
+                </button>
+              </>
             )}
 
-            <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-              <button
-                type="button"
-                data-ocid="round_over.play_again.button"
-                onClick={handlePlayAgain}
-                style={{
-                  background: "linear-gradient(135deg, #00bbdd, #0044ff)",
-                  border: "none",
-                  borderRadius: 12,
-                  padding: "12px 32px",
-                  color: "white",
-                  fontSize: 16,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  boxShadow: "0 0 20px rgba(0,170,255,0.4)",
-                  fontFamily: "inherit",
-                }}
-              >
-                Play Again
-              </button>
+            <div
+              style={{
+                display: "flex",
+                gap: 12,
+                marginTop: modeState.isComplete ? 16 : 0,
+              }}
+            >
+              {modeState.isComplete && (
+                <button
+                  type="button"
+                  data-ocid="round_over.play_again.button"
+                  onClick={handlePlayAgain}
+                  style={{
+                    background: "linear-gradient(135deg, #00bbdd, #0044ff)",
+                    border: "none",
+                    borderRadius: 12,
+                    padding: "12px 32px",
+                    color: "white",
+                    fontSize: 16,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    boxShadow: "0 0 20px rgba(0,170,255,0.4)",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Play Again
+                </button>
+              )}
               <button
                 type="button"
                 data-ocid="round_over.menu.button"
