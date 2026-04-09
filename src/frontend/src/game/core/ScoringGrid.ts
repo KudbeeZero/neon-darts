@@ -48,7 +48,7 @@ export function lookupZone(nx: number, ny: number): ZoneResult {
     return { segment: 0, ring: "miss", score: 0, label: "MISS" };
 
   // atan2(x, y) gives angle from +Y axis, increasing clockwise
-  let angle = Math.atan2(nx, ny) * (180 / Math.PI);
+  let angle = Math.atan2(nx, ny) * (180 / Math.PI) + 9; // +9° offset to align with board image
   if (angle < 0) angle += 360;
 
   // Segment 0 (value=20) centred at 0° (top). Each segment is 18°.

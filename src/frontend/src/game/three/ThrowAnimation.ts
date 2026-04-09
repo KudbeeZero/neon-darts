@@ -8,6 +8,7 @@ export interface AnimFrame {
   t: number;
   complete: boolean;
   landingZone: ZoneResult;
+  tangentY: number;
 }
 
 export class ThrowAnimation {
@@ -63,6 +64,7 @@ export class ThrowAnimation {
       t,
       complete: t >= 1,
       landingZone: this.plannedThrow.landingZone,
+      tangentY: this._tan.y,
     };
   }
 }

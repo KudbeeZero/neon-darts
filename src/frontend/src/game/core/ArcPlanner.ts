@@ -9,7 +9,8 @@ import { SEGMENT_ORDER, type ZoneResult, lookupZone } from "./ScoringGrid";
 
 export const BOARD_Z = -5.0;
 export const BOARD_RADIUS = 1.5; // Three.js units
-export const DART_START = new THREE.Vector3(0, -0.3, -1.5);
+export const BOARD_Y_OFFSET = 1.1; // Visual offset of board center above y=0 (pushed higher)
+export const DART_START = new THREE.Vector3(0, -0.6, -0.9);
 
 export interface PlannedThrow {
   p0: THREE.Vector3;
@@ -20,6 +21,7 @@ export interface PlannedThrow {
   power: number;
   flightMs: number;
   landingPos3D: THREE.Vector3;
+  isPerfect: boolean;
 }
 
 // ── Zone snap (only near premium zones) ─────────────────────────────────────
@@ -69,10 +71,10 @@ function snapToZone(nx: number, ny: number): { x: number; y: number } {
 }
 
 // ── Power curve ─────────────────────────────────────────────────────────────
-
+// Lowered MIN from 150→60 and MAX from 1500→800 so light flicks register easily
 function computePower(velocityMag: number): number {
-  const MIN = 150;
-  const MAX = 1500;
+  const MIN = 60;
+  const MAX = 800;
   const t = Math.min(Math.max(velocityMag - MIN, 0) / (MAX - MIN), 1);
   return t ** 0.6;
 }
@@ -80,62 +82,78 @@ function computePower(velocityMag: number): number {
 // ── Main planner ─────────────────────────────────────────────────────────────
 
 /**
- * Plan a throw from touch input.
- * @param touchX - X position where touch started (screen pixels)
- * @param touchY - Y position where touch started
+ * Plan a throw from drag-delta input.
+ * @param dragDX  - horizontal drag delta (currentX - startX), in screen pixels
+ * @param dragDY  - vertical drag delta (currentY - startY), in screen pixels
  * @param velocityMag - swipe speed in px/s
  * @param screenW - window.innerWidth
  * @param screenH - window.innerHeight
+ *
+ * dragDX of 0 = bullseye center, negative = left, positive = right
+ * dragDY of 0 = bullseye center, drag UP (negative dy) = aim higher
  */
 export function planThrow(
-  touchX: number,
-  touchY: number,
+  dragDX: number,
+  dragDY: number,
   velocityMag: number,
   screenW: number,
   screenH: number,
 ): PlannedThrow {
-  // Map screen position to normalised board coordinates
-  // Board centre projects to approximately (screenW/2, screenH*0.5)
-  const normX = (touchX - screenW * 0.5) / (screenW * 0.42);
-  const normY = -((touchY - screenH * 0.48) / (screenH * 0.42));
-
-  // Clamp to board edge
-  const clampedX = Math.max(-0.98, Math.min(0.98, normX));
-  const clampedY = Math.max(-0.98, Math.min(0.98, normY));
+  // Map drag delta to normalised board coordinates
+  // Full left: dragDX = -screenW*0.35, Full right: dragDX = +screenW*0.35
+  const normX = Math.max(-1, Math.min(1, dragDX / (screenW * 0.35)));
+  // Drag UP = negative dy = aim higher on board
+  const normY = Math.max(-1, Math.min(1, -dragDY / (screenH * 0.28)));
 
   // Zone autocorrect near premium zones
-  const snapped = snapToZone(clampedX, clampedY);
+  const snapped = snapToZone(normX, normY);
 
   const landingX = snapped.x * BOARD_RADIUS;
-  const landingY = snapped.y * BOARD_RADIUS;
+  // Add BOARD_Y_OFFSET so dart lands at the visual board center, not y=0
+  const landingY = snapped.y * BOARD_RADIUS + BOARD_Y_OFFSET;
   const landingPos3D = new THREE.Vector3(landingX, landingY, BOARD_Z);
   const landingZone = lookupZone(snapped.x, snapped.y);
 
   const power = computePower(velocityMag);
-  const flightMs = 320 + (1 - power) * 300; // 320–620 ms
 
-  // Bezier control points — create a natural parabolic arc
-  // p0: dart start (low foreground)
-  // p1: early lift (near start, pulled up)
-  // p2: late apex (near end, still elevated)
-  // p3: landing on board
+  // Longer hang time for soft throws — missile-like lob feel
+  const flightMs = 350 + (1 - power) * 550; // 350ms (hard) to 900ms (soft)
+
+  // Dramatic missile arc — rises very high then plunges into the board
+  const arcHeight = 3.5 + (1 - power) * 3.5; // 3.5 (hard) to 7.0 (soft)
+
   const p0 = DART_START.clone();
   const p3 = landingPos3D.clone();
 
-  const arcHeight = 0.35 + (1 - power) * 1.1; // 0.35 (hard) to 1.45 (soft)
-
   const p1 = new THREE.Vector3(
-    p0.x * 0.5 + p3.x * 0.15,
-    p0.y + arcHeight * 0.9,
-    -2.4,
+    p0.x * 0.3 + p3.x * 0.1,
+    p0.y + arcHeight * 1.6, // very high peak — missile arc
+    -2.8,
   );
+  // p2 drops below the landing point for a dramatic plunge into the board
   const p2 = new THREE.Vector3(
-    p0.x * 0.1 + p3.x * 0.85,
-    p3.y + arcHeight * 0.45,
-    -4.0,
+    p0.x * 0.05 + p3.x * 0.9,
+    p3.y - arcHeight * 0.5, // drops well below target for dramatic plunge
+    -4.2,
   );
 
-  return { p0, p1, p2, p3, landingZone, power, flightMs, landingPos3D };
+  // Perfect shot = bullseye or triple 20 (triggers cinematic camera)
+  const isPerfect =
+    landingZone.ring === "bullseye" ||
+    landingZone.ring === "bull" ||
+    (landingZone.ring === "triple" && landingZone.segment === 20);
+
+  return {
+    p0,
+    p1,
+    p2,
+    p3,
+    landingZone,
+    power,
+    flightMs,
+    landingPos3D,
+    isPerfect,
+  };
 }
 
 // Re-export SEGMENT_ORDER for board drawing

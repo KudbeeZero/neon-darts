@@ -11,7 +11,7 @@ const TargetRing = forwardRef<THREE.Mesh, TargetRingProps>(function TargetRing(
 ) {
   return (
     <mesh ref={ref} position={[position.x, position.y, position.z + 0.012]}>
-      <ringGeometry args={[0.065, 0.095, 40]} />
+      <ringGeometry args={[0.18, 0.26, 40]} />
       <meshBasicMaterial
         color="#ffffff"
         transparent

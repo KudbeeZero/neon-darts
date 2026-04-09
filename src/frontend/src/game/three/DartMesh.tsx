@@ -1,102 +1,206 @@
-import { forwardRef, useImperativeHandle, useRef } from "react";
+import { forwardRef, useImperativeHandle, useMemo, useRef } from "react";
 import * as THREE from "three";
 
 export interface DartMeshHandle {
   group: THREE.Group | null;
   setFlightRoll: (t: number) => void;
+  setBarrelRoll: (angle: number) => void;
 }
 
-const GRIP_Z = [0.13, 0.19, 0.25] as const;
+// Flight wing shape — swept-back arrow
+function createFlightShape(): THREE.ShapeGeometry {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.lineTo(0.045, 0.13);
+  shape.lineTo(0.012, 0.06);
+  shape.lineTo(0.012, 0);
+  shape.closePath();
+  return new THREE.ShapeGeometry(shape);
+}
 
 const DartMesh = forwardRef<DartMeshHandle, object>(function DartMesh(_, ref) {
   const groupRef = useRef<THREE.Group>(null);
-  const flight1Ref = useRef<THREE.Mesh>(null);
-  const flight2Ref = useRef<THREE.Mesh>(null);
+  const f1aRef = useRef<THREE.Mesh>(null);
+  const f1bRef = useRef<THREE.Mesh>(null);
+  const f2aRef = useRef<THREE.Mesh>(null);
+  const f2bRef = useRef<THREE.Mesh>(null);
+
+  const flightGeo = useMemo(() => createFlightShape(), []);
 
   useImperativeHandle(ref, () => ({
     get group() {
       return groupRef.current;
     },
     setFlightRoll(t: number) {
-      const scale = 1 + Math.sin(t * Math.PI * 10) * 0.45;
-      if (flight1Ref.current) flight1Ref.current.scale.x = scale;
-      if (flight2Ref.current) flight2Ref.current.scale.x = scale;
+      const angle = t * Math.PI * 12;
+      const refs = [f1aRef, f1bRef, f2aRef, f2bRef];
+      refs.forEach((r, i) => {
+        if (r.current) {
+          r.current.rotation.z = (Math.PI / 2) * i + angle;
+        }
+      });
+    },
+    setBarrelRoll(angle: number) {
+      const refs = [f1aRef, f1bRef, f2aRef, f2bRef];
+      refs.forEach((r, i) => {
+        if (r.current) {
+          r.current.rotation.z = (Math.PI / 2) * i + angle;
+        }
+      });
     },
   }));
 
   return (
-    <group ref={groupRef} position={[0, -0.3, -1.5]}>
-      {/* Tip — apex at z=0 (group origin), cone extends +Z */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0.04]} castShadow>
-        <coneGeometry args={[0.012, 0.08, 8]} />
+    <group ref={groupRef} position={[0, -0.55, -0.9]} scale={[2.5, 2.5, 2.5]}>
+      {/* ── TIP ── */}
+      <mesh position={[0, 0, -0.005]}>
+        <coneGeometry args={[0.004, 0.055, 10]} />
         <meshStandardMaterial
-          color="#d4d4d4"
-          metalness={0.95}
-          roughness={0.05}
+          color="#d8d8e8"
+          metalness={1.0}
+          roughness={0.02}
           emissive="#aaaacc"
           emissiveIntensity={0.1}
         />
       </mesh>
 
-      {/* Barrel */}
-      <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 0, 0.19]} castShadow>
-        <cylinderGeometry args={[0.013, 0.018, 0.22, 12]} />
+      {/* ── FRONT TAPER ── */}
+      <mesh position={[0, 0, 0.055]}>
+        {/* wider rear end to match bigger barrel */}
+        <cylinderGeometry args={[0.004, 0.018, 0.06, 12]} />
         <meshStandardMaterial
-          color="#1a1a2e"
-          metalness={0.95}
-          roughness={0.08}
-          emissive="#0033aa"
-          emissiveIntensity={0.18}
+          color="#c0c0d8"
+          metalness={0.98}
+          roughness={0.05}
         />
       </mesh>
 
-      {/* Grip rings */}
-      {GRIP_Z.map((z) => (
-        <mesh key={z} rotation={[Math.PI / 2, 0, 0]} position={[0, 0, z]}>
-          <cylinderGeometry args={[0.019, 0.019, 0.012, 10]} />
+      {/* ── BARREL: slightly bigger (was 0.014/0.013) ── */}
+      <mesh position={[0, 0, 0.135]}>
+        <cylinderGeometry args={[0.018, 0.016, 0.18, 16]} />
+        <meshStandardMaterial
+          color="#1c1c2c"
+          metalness={0.97}
+          roughness={0.06}
+          emissive="#111133"
+          emissiveIntensity={0.4}
+        />
+      </mesh>
+
+      {/* Barrel highlight stripe */}
+      <mesh position={[0, 0, 0.13]}>
+        <cylinderGeometry args={[0.019, 0.019, 0.04, 16]} />
+        <meshStandardMaterial
+          color="#8899ff"
+          metalness={1.0}
+          roughness={0.0}
+          emissive="#8899ff"
+          emissiveIntensity={0.5}
+          transparent
+          opacity={0.6}
+        />
+      </mesh>
+
+      {/* Knurl rings x5 */}
+      {[0.07, 0.1, 0.13, 0.16, 0.19].map((z) => (
+        <mesh key={z} position={[0, 0, z]}>
+          <cylinderGeometry args={[0.02, 0.02, 0.008, 14]} />
           <meshStandardMaterial
             color="#aaaacc"
-            metalness={0.9}
-            roughness={0.15}
+            metalness={1.0}
+            roughness={0.05}
+            emissive="#6677bb"
+            emissiveIntensity={0.2}
           />
         </mesh>
       ))}
 
-      {/* Flights — horizontal */}
-      <mesh
-        ref={flight1Ref}
-        rotation={[Math.PI / 2, 0, 0]}
-        position={[0, 0, 0.32]}
-      >
-        <planeGeometry args={[0.14, 0.1]} />
+      {/* ── REAR TAPER ── */}
+      <mesh position={[0, 0, 0.235]}>
+        <cylinderGeometry args={[0.01, 0.018, 0.05, 12]} />
         <meshStandardMaterial
-          color="#ff0088"
-          emissive="#ff0088"
-          emissiveIntensity={0.6}
-          side={THREE.DoubleSide}
-          roughness={0.3}
-          metalness={0.1}
-          transparent
-          opacity={0.9}
+          color="#2a2a40"
+          metalness={0.95}
+          roughness={0.08}
         />
       </mesh>
 
-      {/* Flights — vertical */}
-      <mesh
-        ref={flight2Ref}
-        rotation={[Math.PI / 2, 0, Math.PI / 2]}
-        position={[0, 0, 0.32]}
-      >
-        <planeGeometry args={[0.14, 0.1]} />
+      {/* ── SHAFT / STEM ── */}
+      <mesh position={[0, 0, 0.29]}>
+        <cylinderGeometry args={[0.005, 0.008, 0.08, 10]} />
         <meshStandardMaterial
-          color="#0066ff"
-          emissive="#0066ff"
-          emissiveIntensity={0.6}
+          color="#222233"
+          metalness={0.9}
+          roughness={0.1}
+          emissive="#0022aa"
+          emissiveIntensity={0.2}
+        />
+      </mesh>
+
+      {/* ── FLIGHTS ── */}
+      <mesh position={[0, 0, 0.335]}>
+        <cylinderGeometry args={[0.007, 0.007, 0.012, 8]} />
+        <meshStandardMaterial color="#111122" metalness={0.9} roughness={0.2} />
+      </mesh>
+
+      <mesh ref={f1aRef} position={[0, 0, 0.335]}>
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#00ccff"
+          emissive="#00ccff"
+          emissiveIntensity={1.2}
           side={THREE.DoubleSide}
-          roughness={0.3}
-          metalness={0.1}
           transparent
-          opacity={0.9}
+          opacity={0.92}
+          roughness={0.15}
+          metalness={0.1}
+        />
+      </mesh>
+      <mesh ref={f1bRef} position={[0, 0, 0.335]} rotation={[0, 0, Math.PI]}>
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#00ccff"
+          emissive="#00ccff"
+          emissiveIntensity={1.2}
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.92}
+          roughness={0.15}
+          metalness={0.1}
+        />
+      </mesh>
+      <mesh
+        ref={f2aRef}
+        position={[0, 0, 0.335]}
+        rotation={[0, 0, Math.PI / 2]}
+      >
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#ff0088"
+          emissive="#ff0088"
+          emissiveIntensity={1.2}
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.92}
+          roughness={0.15}
+          metalness={0.1}
+        />
+      </mesh>
+      <mesh
+        ref={f2bRef}
+        position={[0, 0, 0.335]}
+        rotation={[0, 0, -Math.PI / 2]}
+      >
+        <primitive object={flightGeo} />
+        <meshStandardMaterial
+          color="#ff0088"
+          emissive="#ff0088"
+          emissiveIntensity={1.2}
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.92}
+          roughness={0.15}
+          metalness={0.1}
         />
       </mesh>
     </group>

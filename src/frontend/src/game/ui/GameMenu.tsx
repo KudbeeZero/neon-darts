@@ -1,6 +1,27 @@
 import { motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { GameModeType } from "../core/GameModes";
+
+const MENU_STYLES = `
+  @keyframes neonGlow {
+    0%, 100% { text-shadow: 0 0 20px #00ddff, 0 0 60px #00ddff, 0 0 100px #0088ff; }
+    50% { text-shadow: 0 0 10px #00ddff, 0 0 25px #00ddff; }
+  }
+  @keyframes neonPulse {
+    0%, 100% {
+      box-shadow: 0 0 30px rgba(0,170,255,0.5), 0 4px 20px rgba(0,0,0,0.4), 0 0 60px rgba(0,170,255,0.3);
+    }
+    50% {
+      box-shadow: 0 0 16px rgba(0,170,255,0.3), 0 4px 20px rgba(0,0,0,0.4), 0 0 30px rgba(0,170,255,0.15);
+    }
+  }
+  .neon-title {
+    animation: neonGlow 2s ease-in-out infinite;
+  }
+  .play-button {
+    animation: neonPulse 1.5s ease-in-out infinite;
+  }
+`;
 
 interface GameMenuProps {
   onStart: (mode: GameModeType) => void;
@@ -28,7 +49,7 @@ const MODES: {
     id: "doubles",
     label: "Doubles",
     desc: "Hit all doubles D1→D20",
-    color: "#ff6600",
+    color: "#ffaa00",
   },
   {
     id: "triples",
@@ -40,6 +61,19 @@ const MODES: {
 
 export default function GameMenu({ onStart }: GameMenuProps) {
   const [selected, setSelected] = useState<GameModeType>("301");
+  const [hoveredMode, setHoveredMode] = useState<GameModeType | null>(null);
+  const styleInjected = useRef(false);
+
+  useEffect(() => {
+    if (styleInjected.current) return;
+    styleInjected.current = true;
+    const style = document.createElement("style");
+    style.textContent = MENU_STYLES;
+    document.head.appendChild(style);
+    return () => {
+      document.head.removeChild(style);
+    };
+  }, []);
 
   return (
     <motion.div
@@ -70,6 +104,7 @@ export default function GameMenu({ onStart }: GameMenuProps) {
         style={{ textAlign: "center", marginBottom: 32 }}
       >
         <div
+          className="neon-title"
           style={{
             fontSize: 54,
             fontWeight: 800,
@@ -110,62 +145,82 @@ export default function GameMenu({ onStart }: GameMenuProps) {
           marginBottom: 24,
         }}
       >
-        {MODES.map((m) => (
-          <button
-            key={m.id}
-            type="button"
-            data-ocid={`menu.${m.id}.button`}
-            onClick={() => setSelected(m.id)}
-            style={{
-              background:
-                selected === m.id
-                  ? `rgba(${m.id === "301" ? "0,220,255" : m.id === "around_world" ? "255,0,136" : m.id === "doubles" ? "255,100,0" : "0,255,136"},0.18)`
-                  : "rgba(10,10,30,0.6)",
-              border: `1.5px solid ${
-                selected === m.id ? m.color : "rgba(80,80,120,0.5)"
-              }`,
-              borderRadius: 12,
-              padding: "12px 18px",
-              cursor: "pointer",
-              textAlign: "left",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              transition: "all 0.18s ease",
-              boxShadow: selected === m.id ? `0 0 16px ${m.color}44` : "none",
-            }}
-          >
-            <div>
-              <div
-                style={{
-                  color: selected === m.id ? m.color : "#ccccee",
-                  fontSize: 16,
-                  fontWeight: 700,
-                  transition: "color 0.18s",
-                }}
-              >
-                {m.label}
+        {MODES.map((m) => {
+          const isSelected = selected === m.id;
+          const isHovered = hoveredMode === m.id;
+          return (
+            <button
+              key={m.id}
+              type="button"
+              data-ocid={`menu.${m.id}.button`}
+              onClick={() => setSelected(m.id)}
+              onMouseEnter={() => setHoveredMode(m.id)}
+              onMouseLeave={() => setHoveredMode(null)}
+              style={{
+                background: isSelected
+                  ? `rgba(${m.id === "301" ? "0,220,255" : m.id === "around_world" ? "255,0,136" : m.id === "doubles" ? "255,170,0" : "0,255,136"},0.18)`
+                  : isHovered
+                    ? `rgba(${m.id === "301" ? "0,220,255" : m.id === "around_world" ? "255,0,136" : m.id === "doubles" ? "255,170,0" : "0,255,136"},0.08)`
+                    : "rgba(10,10,30,0.6)",
+                border: `1.5px solid ${
+                  isSelected
+                    ? m.color
+                    : isHovered
+                      ? `${m.color}88`
+                      : "rgba(80,80,120,0.5)"
+                }`,
+                borderRadius: 12,
+                padding: "12px 18px",
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                transition: "all 0.18s ease",
+                boxShadow: isSelected
+                  ? `0 0 24px ${m.color}66`
+                  : isHovered
+                    ? `0 0 16px ${m.color}33`
+                    : "none",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    color: isSelected
+                      ? m.color
+                      : isHovered
+                        ? `${m.color}cc`
+                        : "#ccccee",
+                    fontSize: 16,
+                    fontWeight: 700,
+                    transition: "color 0.18s",
+                  }}
+                >
+                  {m.label}
+                </div>
+                <div style={{ color: "#666688", fontSize: 12 }}>{m.desc}</div>
               </div>
-              <div style={{ color: "#666688", fontSize: 12 }}>{m.desc}</div>
-            </div>
-            {selected === m.id && (
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  background: m.color,
-                  boxShadow: `0 0 8px ${m.color}`,
-                }}
-              />
-            )}
-          </button>
-        ))}
+              {isSelected && (
+                <div
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: m.color,
+                    boxShadow: `0 0 10px ${m.color}, 0 0 20px ${m.color}`,
+                  }}
+                />
+              )}
+            </button>
+          );
+        })}
       </motion.div>
 
       {/* Start button */}
       <motion.button
         type="button"
+        className="play-button"
         initial={{ scale: 0.8, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ delay: 0.35 }}
@@ -183,7 +238,6 @@ export default function GameMenu({ onStart }: GameMenuProps) {
           fontWeight: 800,
           letterSpacing: 2,
           cursor: "pointer",
-          boxShadow: "0 0 30px rgba(0,170,255,0.5), 0 4px 20px rgba(0,0,0,0.4)",
           fontFamily: "inherit",
         }}
       >

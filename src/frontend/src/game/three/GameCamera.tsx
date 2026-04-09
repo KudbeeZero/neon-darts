@@ -36,14 +36,17 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
     });
 
     useImperativeHandle(ref, () => ({
+      // Only call this for perfect shots — triggers dramatic zoom
       startThrow(_landingPos: THREE.Vector3, flightMs: number) {
         const s = camState.current;
         s.mode = "zooming";
         s.startTime = Date.now();
         s.flightMs = flightMs;
       },
+      // Always called on impact — triggers screen shake
       onImpact() {
         const s = camState.current;
+        // If we were zooming, trigger shake from current fov/pos
         s.mode = "shaking";
         s.shakeStartTime = Date.now();
       },
@@ -56,13 +59,14 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
 
       if (s.mode === "zooming") {
         const t = Math.min(1, (now - s.startTime) / s.flightMs);
-        cam.fov = THREE.MathUtils.lerp(75, 52, t * t);
-        cam.position.z = THREE.MathUtils.lerp(0, -0.25, t * t);
+        // Dramatic zoom for perfect shots: FOV 75→48, slight push forward
+        cam.fov = THREE.MathUtils.lerp(75, 48, t * t);
+        cam.position.z = THREE.MathUtils.lerp(0, -0.35, t * t);
         cam.updateProjectionMatrix();
       } else if (s.mode === "shaking") {
         const elapsed = now - s.shakeStartTime;
-        if (elapsed < 280) {
-          const intensity = 0.009 * (1 - elapsed / 280);
+        if (elapsed < 320) {
+          const intensity = 0.012 * (1 - elapsed / 320);
           cam.position.x = (Math.random() - 0.5) * intensity * 2;
           cam.position.y = 0.15 + (Math.random() - 0.5) * intensity * 2;
         } else {

@@ -31,17 +31,26 @@ function computeRecencyVelocity(history: PointerSample[]): number {
 interface TouchLayerProps {
   enabled: boolean;
   onThrow: (pt: PlannedThrow) => void;
+  onAimUpdate?: (normX: number, normY: number) => void;
 }
 
-export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
+export default function TouchLayer({
+  enabled,
+  onThrow,
+  onAimUpdate,
+}: TouchLayerProps) {
   const enabledRef = useRef(enabled);
   const onThrowRef = useRef(onThrow);
+  const onAimUpdateRef = useRef(onAimUpdate);
 
   useEffect(() => {
     enabledRef.current = enabled;
   });
   useEffect(() => {
     onThrowRef.current = onThrow;
+  });
+  useEffect(() => {
+    onAimUpdateRef.current = onAimUpdate;
   });
 
   useEffect(() => {
@@ -51,8 +60,8 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
     let history: PointerSample[] = [];
 
     const onStart = (e: TouchEvent) => {
-      e.preventDefault();
       if (!enabledRef.current || activeTouchId !== null) return;
+      e.preventDefault();
       const touch = e.changedTouches[0];
       activeTouchId = touch.identifier;
       startX = touch.clientX;
@@ -61,8 +70,8 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
     };
 
     const onMove = (e: TouchEvent) => {
+      if (!enabledRef.current || activeTouchId === null) return;
       e.preventDefault();
-      if (activeTouchId === null) return;
       let touch: Touch | null = null;
       for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === activeTouchId) {
@@ -73,11 +82,21 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
       if (!touch) return;
       history.push({ x: touch.clientX, y: touch.clientY, t: Date.now() });
       if (history.length > 12) history.shift();
+
+      // Emit live aim update while finger is held/dragging
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const normX = Math.max(-1, Math.min(1, dx / (window.innerWidth * 0.35)));
+      const normY = Math.max(
+        -1,
+        Math.min(1, -dy / (window.innerHeight * 0.28)),
+      );
+      onAimUpdateRef.current?.(normX, normY);
     };
 
     const onEnd = (e: TouchEvent) => {
-      e.preventDefault();
       if (activeTouchId === null) return;
+      e.preventDefault();
       let touch: Touch | null = null;
       for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === activeTouchId) {
@@ -90,20 +109,17 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
         return;
       }
       activeTouchId = null;
-
       if (!enabledRef.current) return;
-
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 8) return; // too small a movement
 
       history.push({ x: touch.clientX, y: touch.clientY, t: Date.now() });
       const velocityMag = computeRecencyVelocity(history);
 
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      // Always fire a throw — even taps fire straight ahead at min power
       const pt = planThrow(
-        startX,
-        startY,
+        dx,
+        dy,
         velocityMag,
         window.innerWidth,
         window.innerHeight,
@@ -117,7 +133,7 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
     document.addEventListener("touchend", onEnd, opts);
     document.addEventListener("touchcancel", onEnd, opts);
 
-    // Also support mouse for desktop testing
+    // Mouse support for desktop testing
     let mouseDown = false;
     let mouseStartX = 0;
     let mouseStartY = 0;
@@ -134,22 +150,23 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
       if (!mouseDown) return;
       mouseHistory.push({ x: e.clientX, y: e.clientY, t: Date.now() });
       if (mouseHistory.length > 12) mouseHistory.shift();
+      const dx = e.clientX - mouseStartX;
+      const dy = e.clientY - mouseStartY;
+      const normX = Math.max(-1, Math.min(1, dx / (window.innerWidth * 0.35)));
+      const normY = Math.max(
+        -1,
+        Math.min(1, -dy / (window.innerHeight * 0.28)),
+      );
+      onAimUpdateRef.current?.(normX, normY);
     };
     const onMouseUp = (e: MouseEvent) => {
       if (!mouseDown || !enabledRef.current) return;
       mouseDown = false;
       const dx = e.clientX - mouseStartX;
       const dy = e.clientY - mouseStartY;
-      if (Math.sqrt(dx * dx + dy * dy) < 8) return;
       mouseHistory.push({ x: e.clientX, y: e.clientY, t: Date.now() });
       const vel = computeRecencyVelocity(mouseHistory);
-      const pt = planThrow(
-        mouseStartX,
-        mouseStartY,
-        vel,
-        window.innerWidth,
-        window.innerHeight,
-      );
+      const pt = planThrow(dx, dy, vel, window.innerWidth, window.innerHeight);
       onThrowRef.current(pt);
     };
 
@@ -184,7 +201,6 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
     };
   }, []);
 
-  // Invisible overlay — captures pointer events on mobile, prevents scrolling
   return (
     <div
       style={{
@@ -194,7 +210,6 @@ export default function TouchLayer({ enabled, onThrow }: TouchLayerProps) {
         touchAction: "none",
         userSelect: "none",
         WebkitUserSelect: "none",
-        // pointer-events none would block, but we register on document directly
         pointerEvents: "none",
       }}
     />
