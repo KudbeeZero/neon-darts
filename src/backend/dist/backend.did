@@ -1,0 +1,18 @@
+type Time = int;
+type GameResult = 
+ record {
+   dartsThrown: nat;
+   didWin: bool;
+   playerName: text;
+   remainingScore: nat;
+   scoreSubmittedBy: principal;
+   timestamp: Time;
+ };
+service : {
+  getLeaderboard: () -> (vec GameResult) query;
+  getPlayerGames: () -> (vec GameResult) query;
+  getRecentGames: () -> (vec GameResult) query;
+  getResult: (gameId: nat) -> (GameResult) query;
+  submitGame: (playerName: text, remainingScore: nat, dartsThrown: nat,
+   didWin: bool) -> (nat);
+}

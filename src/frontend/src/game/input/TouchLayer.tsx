@@ -28,6 +28,27 @@ function computeRecencyVelocity(history: PointerSample[]): number {
   return Math.sqrt(finalVX * finalVX + finalVY * finalVY);
 }
 
+/**
+ * Map absolute screen position to normalised board coords (-1..1).
+ * Top of screen → top of board (+1), bottom → bottom (-1).
+ * Left edge → left edge (-1), right edge → right edge (+1).
+ */
+function screenToNorm(
+  clientX: number,
+  clientY: number,
+): { normX: number; normY: number } {
+  const normX = Math.max(
+    -1,
+    Math.min(1, (clientX / window.innerWidth) * 2 - 1),
+  );
+  // Y is flipped: top of screen = top of board = +1
+  const normY = Math.max(
+    -1,
+    Math.min(1, 1 - (clientY / window.innerHeight) * 2),
+  );
+  return { normX, normY };
+}
+
 interface TouchLayerProps {
   enabled: boolean;
   onThrow: (pt: PlannedThrow) => void;
@@ -55,18 +76,23 @@ export default function TouchLayer({
 
   useEffect(() => {
     let activeTouchId: number | null = null;
-    let startX = 0;
-    let startY = 0;
     let history: PointerSample[] = [];
+    // Store last aim position for throw
+    let lastNormX = 0;
+    let lastNormY = 0;
 
     const onStart = (e: TouchEvent) => {
       if (!enabledRef.current || activeTouchId !== null) return;
       e.preventDefault();
       const touch = e.changedTouches[0];
       activeTouchId = touch.identifier;
-      startX = touch.clientX;
-      startY = touch.clientY;
       history = [{ x: touch.clientX, y: touch.clientY, t: Date.now() }];
+
+      // Immediately aim at touch position
+      const { normX, normY } = screenToNorm(touch.clientX, touch.clientY);
+      lastNormX = normX;
+      lastNormY = normY;
+      onAimUpdateRef.current?.(normX, normY);
     };
 
     const onMove = (e: TouchEvent) => {
@@ -83,14 +109,10 @@ export default function TouchLayer({
       history.push({ x: touch.clientX, y: touch.clientY, t: Date.now() });
       if (history.length > 12) history.shift();
 
-      // Emit live aim update while finger is held/dragging
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      const normX = Math.max(-1, Math.min(1, dx / (window.innerWidth * 0.35)));
-      const normY = Math.max(
-        -1,
-        Math.min(1, -dy / (window.innerHeight * 0.28)),
-      );
+      // Direct absolute position mapping
+      const { normX, normY } = screenToNorm(touch.clientX, touch.clientY);
+      lastNormX = normX;
+      lastNormY = normY;
       onAimUpdateRef.current?.(normX, normY);
     };
 
@@ -114,16 +136,12 @@ export default function TouchLayer({
       history.push({ x: touch.clientX, y: touch.clientY, t: Date.now() });
       const velocityMag = computeRecencyVelocity(history);
 
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      // Always fire a throw — even taps fire straight ahead at min power
-      const pt = planThrow(
-        dx,
-        dy,
-        velocityMag,
-        window.innerWidth,
-        window.innerHeight,
-      );
+      // Use ABSOLUTE position from touchend as the landing zone target
+      const { normX, normY } = screenToNorm(touch.clientX, touch.clientY);
+      lastNormX = normX;
+      lastNormY = normY;
+
+      const pt = planThrow(lastNormX, lastNormY, velocityMag);
       onThrowRef.current(pt);
     };
 
@@ -135,38 +153,41 @@ export default function TouchLayer({
 
     // Mouse support for desktop testing
     let mouseDown = false;
-    let mouseStartX = 0;
-    let mouseStartY = 0;
     let mouseHistory: PointerSample[] = [];
+    let mouseLastNormX = 0;
+    let mouseLastNormY = 0;
 
     const onMouseDown = (e: MouseEvent) => {
       if (!enabledRef.current) return;
       mouseDown = true;
-      mouseStartX = e.clientX;
-      mouseStartY = e.clientY;
       mouseHistory = [{ x: e.clientX, y: e.clientY, t: Date.now() }];
+
+      const { normX, normY } = screenToNorm(e.clientX, e.clientY);
+      mouseLastNormX = normX;
+      mouseLastNormY = normY;
+      onAimUpdateRef.current?.(normX, normY);
     };
     const onMouseMove = (e: MouseEvent) => {
       if (!mouseDown) return;
       mouseHistory.push({ x: e.clientX, y: e.clientY, t: Date.now() });
       if (mouseHistory.length > 12) mouseHistory.shift();
-      const dx = e.clientX - mouseStartX;
-      const dy = e.clientY - mouseStartY;
-      const normX = Math.max(-1, Math.min(1, dx / (window.innerWidth * 0.35)));
-      const normY = Math.max(
-        -1,
-        Math.min(1, -dy / (window.innerHeight * 0.28)),
-      );
+
+      const { normX, normY } = screenToNorm(e.clientX, e.clientY);
+      mouseLastNormX = normX;
+      mouseLastNormY = normY;
       onAimUpdateRef.current?.(normX, normY);
     };
     const onMouseUp = (e: MouseEvent) => {
       if (!mouseDown || !enabledRef.current) return;
       mouseDown = false;
-      const dx = e.clientX - mouseStartX;
-      const dy = e.clientY - mouseStartY;
       mouseHistory.push({ x: e.clientX, y: e.clientY, t: Date.now() });
       const vel = computeRecencyVelocity(mouseHistory);
-      const pt = planThrow(dx, dy, vel, window.innerWidth, window.innerHeight);
+
+      const { normX, normY } = screenToNorm(e.clientX, e.clientY);
+      mouseLastNormX = normX;
+      mouseLastNormY = normY;
+
+      const pt = planThrow(mouseLastNormX, mouseLastNormY, vel);
       onThrowRef.current(pt);
     };
 

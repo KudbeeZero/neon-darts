@@ -20,6 +20,12 @@ interface CamState {
   returnStartZ: number;
 }
 
+// Camera constants — first-person Darts of Fury feel
+const IDLE_FOV = 65;
+const IDLE_POS_Y = 0.3;
+const IDLE_POS_Z = 4.5;
+const PERFECT_ZOOM_FOV = 42;
+
 const GameCamera = forwardRef<GameCameraHandle, object>(
   function GameCamera(_, ref) {
     const { camera } = useThree();
@@ -29,10 +35,10 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
       startTime: 0,
       flightMs: 400,
       shakeStartTime: 0,
-      returnStartFov: 75,
+      returnStartFov: IDLE_FOV,
       returnStartX: 0,
-      returnStartY: 0.15,
-      returnStartZ: 0,
+      returnStartY: IDLE_POS_Y,
+      returnStartZ: IDLE_POS_Z,
     });
 
     useImperativeHandle(ref, () => ({
@@ -46,7 +52,6 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
       // Always called on impact — triggers screen shake
       onImpact() {
         const s = camState.current;
-        // If we were zooming, trigger shake from current fov/pos
         s.mode = "shaking";
         s.shakeStartTime = Date.now();
       },
@@ -59,16 +64,20 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
 
       if (s.mode === "zooming") {
         const t = Math.min(1, (now - s.startTime) / s.flightMs);
-        // Dramatic zoom for perfect shots: FOV 75→48, slight push forward
-        cam.fov = THREE.MathUtils.lerp(75, 48, t * t);
-        cam.position.z = THREE.MathUtils.lerp(0, -0.35, t * t);
+        // Dramatic zoom for perfect shots: FOV 65→42, slight push forward
+        cam.fov = THREE.MathUtils.lerp(IDLE_FOV, PERFECT_ZOOM_FOV, t * t);
+        cam.position.z = THREE.MathUtils.lerp(
+          IDLE_POS_Z,
+          IDLE_POS_Z - 0.4,
+          t * t,
+        );
         cam.updateProjectionMatrix();
       } else if (s.mode === "shaking") {
         const elapsed = now - s.shakeStartTime;
         if (elapsed < 320) {
           const intensity = 0.012 * (1 - elapsed / 320);
           cam.position.x = (Math.random() - 0.5) * intensity * 2;
-          cam.position.y = 0.15 + (Math.random() - 0.5) * intensity * 2;
+          cam.position.y = IDLE_POS_Y + (Math.random() - 0.5) * intensity * 2;
         } else {
           s.mode = "returning";
           s.startTime = now;
@@ -80,10 +89,18 @@ const GameCamera = forwardRef<GameCameraHandle, object>(
       } else if (s.mode === "returning") {
         const t = Math.min(1, (now - s.startTime) / 700);
         const eased = 1 - (1 - t) * (1 - t);
-        cam.fov = THREE.MathUtils.lerp(s.returnStartFov, 75, eased);
+        cam.fov = THREE.MathUtils.lerp(s.returnStartFov, IDLE_FOV, eased);
         cam.position.x = THREE.MathUtils.lerp(s.returnStartX, 0, eased);
-        cam.position.y = THREE.MathUtils.lerp(s.returnStartY, 0.15, eased);
-        cam.position.z = THREE.MathUtils.lerp(s.returnStartZ, 0, eased);
+        cam.position.y = THREE.MathUtils.lerp(
+          s.returnStartY,
+          IDLE_POS_Y,
+          eased,
+        );
+        cam.position.z = THREE.MathUtils.lerp(
+          s.returnStartZ,
+          IDLE_POS_Z,
+          eased,
+        );
         cam.updateProjectionMatrix();
         if (t >= 1) s.mode = "idle";
       }

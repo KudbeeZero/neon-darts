@@ -2,6 +2,9 @@
  * ARC PLANNER
  * Computes a fully pre-determined cubic bezier throw path in 3D.
  * The entire flight is computed ONCE at release. No per-frame physics.
+ *
+ * INPUT: absolute normalised aim coords (aimX, aimY in -1..1)
+ *        where (-1,-1) = bottom-left of board, (1,1) = top-right
  */
 
 import * as THREE from "three";
@@ -9,8 +12,9 @@ import { SEGMENT_ORDER, type ZoneResult, lookupZone } from "./ScoringGrid";
 
 export const BOARD_Z = -5.0;
 export const BOARD_RADIUS = 1.5; // Three.js units
-export const BOARD_Y_OFFSET = 1.1; // Visual offset of board center above y=0 (pushed higher)
-export const DART_START = new THREE.Vector3(0, -0.6, -0.9);
+export const BOARD_Y_OFFSET = 0.9; // Board center raised — sits in upper portion of screen
+// Dart start: low in foreground, close to camera for big "holding" feel
+export const DART_START = new THREE.Vector3(0, -1.2, 2.8);
 
 export interface PlannedThrow {
   p0: THREE.Vector3;
@@ -71,7 +75,7 @@ function snapToZone(nx: number, ny: number): { x: number; y: number } {
 }
 
 // ── Power curve ─────────────────────────────────────────────────────────────
-// Lowered MIN from 150→60 and MAX from 1500→800 so light flicks register easily
+// Lowered MIN/MAX so light flicks register easily
 function computePower(velocityMag: number): number {
   const MIN = 60;
   const MAX = 800;
@@ -82,34 +86,24 @@ function computePower(velocityMag: number): number {
 // ── Main planner ─────────────────────────────────────────────────────────────
 
 /**
- * Plan a throw from drag-delta input.
- * @param dragDX  - horizontal drag delta (currentX - startX), in screen pixels
- * @param dragDY  - vertical drag delta (currentY - startY), in screen pixels
- * @param velocityMag - swipe speed in px/s
- * @param screenW - window.innerWidth
- * @param screenH - window.innerHeight
- *
- * dragDX of 0 = bullseye center, negative = left, positive = right
- * dragDY of 0 = bullseye center, drag UP (negative dy) = aim higher
+ * Plan a throw from absolute normalised aim coordinates.
+ * @param aimX  - absolute board target X, -1 (full left) to +1 (full right)
+ * @param aimY  - absolute board target Y, -1 (full bottom) to +1 (full top)
+ * @param velocityMag - swipe speed in px/s (determines power/arc height)
  */
 export function planThrow(
-  dragDX: number,
-  dragDY: number,
+  aimX: number,
+  aimY: number,
   velocityMag: number,
-  screenW: number,
-  screenH: number,
 ): PlannedThrow {
-  // Map drag delta to normalised board coordinates
-  // Full left: dragDX = -screenW*0.35, Full right: dragDX = +screenW*0.35
-  const normX = Math.max(-1, Math.min(1, dragDX / (screenW * 0.35)));
-  // Drag UP = negative dy = aim higher on board
-  const normY = Math.max(-1, Math.min(1, -dragDY / (screenH * 0.28)));
+  // Direct board targeting — aimX/aimY already in -1..1
+  const normX = Math.max(-1, Math.min(1, aimX));
+  const normY = Math.max(-1, Math.min(1, aimY));
 
   // Zone autocorrect near premium zones
   const snapped = snapToZone(normX, normY);
 
   const landingX = snapped.x * BOARD_RADIUS;
-  // Add BOARD_Y_OFFSET so dart lands at the visual board center, not y=0
   const landingY = snapped.y * BOARD_RADIUS + BOARD_Y_OFFSET;
   const landingPos3D = new THREE.Vector3(landingX, landingY, BOARD_Z);
   const landingZone = lookupZone(snapped.x, snapped.y);
@@ -119,21 +113,25 @@ export function planThrow(
   // Longer hang time for soft throws — missile-like lob feel
   const flightMs = 350 + (1 - power) * 550; // 350ms (hard) to 900ms (soft)
 
-  // Dramatic missile arc — rises very high then plunges into the board
-  const arcHeight = 3.5 + (1 - power) * 3.5; // 3.5 (hard) to 7.0 (soft)
+  // Soft throw arc height: 8.0 (user spec). Hard throws are flatter: 3.5
+  // ARC_HEIGHT constant: 8.0 for max (soft throw)
+  const ARC_HEIGHT = 8.0;
+  const arcHeight = 3.5 + (1 - power) * (ARC_HEIGHT - 3.5);
 
   const p0 = DART_START.clone();
   const p3 = landingPos3D.clone();
 
+  // P1: initial outward control point — very high arc peak for missile lob
   const p1 = new THREE.Vector3(
     p0.x * 0.3 + p3.x * 0.1,
-    p0.y + arcHeight * 1.6, // very high peak — missile arc
-    -2.8,
+    p0.y + arcHeight * 1.6,
+    0.5, // still fairly close to camera before arcing away
   );
-  // p2 drops below the landing point for a dramatic plunge into the board
+
+  // P2: drops below landing point for dramatic plunge into the board
   const p2 = new THREE.Vector3(
     p0.x * 0.05 + p3.x * 0.9,
-    p3.y - arcHeight * 0.5, // drops well below target for dramatic plunge
+    p3.y - arcHeight * 0.5,
     -4.2,
   );
 

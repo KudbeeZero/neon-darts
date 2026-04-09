@@ -20,6 +20,7 @@ import {
   processThrow,
 } from "./core/GameModes";
 import type { ZoneResult } from "./core/ScoringGrid";
+import { BARREL_ROLL_SPEED } from "./three/ThrowAnimation";
 
 const ARENA_BG =
   "https://cyan-chemical-capybara-537.mypinata.cloud/ipfs/bafkreigj6ekkwd45x2tfnlhdszi3byapz6sb62gu74blbfpu7hwnoxhuwy?pinataGatewayToken=7zglWYSGiMDzNDI6rKBp6n24Hn5dRANGNukXWHOraLmAUnl5cjJrHMrbnpJJJj2G";
@@ -156,13 +157,15 @@ function GameScene({
       if (positions.length > 8) positions.pop();
     }
 
-    // Only show flight twirl when dart is going downward (descent phase)
-    if (result.tangentY < 0) {
-      dartRef.current?.setFlightRoll(result.t);
-    }
+    // Barrel roll active throughout ENTIRE flight — early build defining feel
+    // angle = t * BARREL_ROLL_SPEED (12π = 6 full rotations)
+    dartRef.current?.setFlightRoll(
+      result.t * (BARREL_ROLL_SPEED / (Math.PI * 12)),
+    );
 
     if (ringRef.current) {
-      const s = Math.max(0.01, 1 - result.t);
+      // Start at scale 1.2, shrink to 0 over full flight duration
+      const s = Math.max(0, 1.2 * (1 - result.t));
       ringRef.current.scale.setScalar(s);
     }
 
@@ -264,7 +267,9 @@ export default function R3FGame() {
   );
 
   const handleAimUpdate = useCallback((normX: number, normY: number) => {
-    aimOffsetRef.current = { x: normX * 0.15, y: normY * 0.12 };
+    // normX/normY are already absolute -1..1 board coordinates
+    // Small nudge multiplier for visual dart drift — not full board movement
+    aimOffsetRef.current = { x: normX * 0.18, y: normY * 0.14 };
   }, []);
 
   const handleImpact = useCallback(
@@ -362,14 +367,15 @@ export default function R3FGame() {
       {/* 3-D Canvas */}
       <Canvas
         style={{ position: "absolute", inset: 0, zIndex: 2 }}
-        camera={{ fov: 62, position: [0, -0.2, 0], near: 0.05, far: 60 }}
+        camera={{ fov: 65, position: [0, 0.3, 4.5], near: 0.05, far: 60 }}
         gl={{
           antialias: true,
           powerPreference: "high-performance",
           alpha: true,
         }}
         onCreated={({ camera, gl }) => {
-          camera.lookAt(0, 0.6, -5);
+          // Look slightly upward toward the board — board sits in upper screen
+          camera.lookAt(0, 0.5, 0);
           gl.setClearColor(0x000000, 0);
         }}
       >
